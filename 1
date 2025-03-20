@@ -53,7 +53,7 @@ def api_request(method, endpoint, params=None, body=None):
         print(f"API request failed: {e}")
         return None
 
-# Function to get symbol info (e.g., minAmount)
+# Function to get symbol info (e.g., minAmount, precision)
 def get_symbol_info(symbol="BTC_USDT"):
     endpoint = "/api/v1/common/symbols"
     params = {"symbols": symbol}
@@ -87,94 +87,15 @@ def get_price(symbol="BTC_USDT"):
     return None
 
 # Function to place an order
-def place_order(symbol, side, quantity, price):
+def place_order(symbol, side, quantity, price, precision):
     endpoint = "/api/v1/trade/order"
     params = {}
     body = {
         "symbol": symbol,
         "side": side.upper(),
         "type": "LIMIT",
-        "size": f"{quantity:.8f}",  # Format to 8 decimal places
+        "size": f"{quantity:.{precision}f}",  # Use dynamic precision from symbol info
         "price": str(price),
         "IOC": False
     }
-    print(f"Placing order with size: {body['size']}")  # Debug output
-    response = api_request("POST", endpoint, params, body)
-    if response and 'data' in response and response['result']:
-        return response['data']
-    else:
-        print(f"Order placement failed: {response}")
-        return None
-
-# Trading bot logic
-def trading_bot():
-    symbol = "BTC_USDT"
-    buy_threshold = 86000  # Buy if price < $86,000
-    sell_threshold = 88000  # Sell if price > $88,000
-    target_usdt = 15.0     # Target $15 worth of BTC per trade
-    holding = False        # Track if we own BTC
-
-    # Get symbol info to validate trading parameters
-    symbol_info = get_symbol_info(symbol)
-    if not symbol_info:
-        print("Bot stopped due to symbol info failure")
-        return
-    min_amount = float(symbol_info['minAmount'])  # e.g., 10 USDT
-    min_trade_size = float(symbol_info['minTradeSize'])  # e.g., 0.000001 BTC
-    print(f"Minimum order amount for {symbol}: ${min_amount}")
-    print(f"Minimum trade size for {symbol}: {min_trade_size} BTC")
-
-    print("Starting Pionex trading bot...")
-    while True:
-        try:
-            price = get_price(symbol)
-            if price is None:
-                time.sleep(60)
-                continue
-
-            # Calculate quantity for $15 worth of BTC
-            quantity = target_usdt / price
-            if quantity < min_trade_size:
-                quantity = min_trade_size  # Ensure at least minimum trade size
-
-            print(f"Current {symbol} price: ${price}")
-            print(f"Calculated quantity: {quantity:.8f} BTC (${quantity * price:.2f})")
-
-            # Check balance and minimum amount
-            order_amount = price * quantity
-            if order_amount < min_amount:
-                print(f"Order amount ${order_amount:.2f} below minimum ${min_amount}. Skipping trade.")
-                time.sleep(60)
-                continue
-
-            if not holding:
-                usdt_balance = get_balance("USDT")
-                print(f"Available USDT balance: ${usdt_balance:.2f}")
-                if usdt_balance < order_amount:
-                    print(f"Insufficient USDT (${usdt_balance:.2f} < ${order_amount:.2f}). Skipping trade.")
-                    time.sleep(60)
-                    continue
-
-            if not holding and price < buy_threshold:
-                print(f"Price below ${buy_threshold}! Buying {quantity:.8f} BTC at ${price}")
-                result = place_order(symbol, "BUY", quantity, price)
-                if result:
-                    print(f"Buy order placed: Order ID {result['orderId']}")
-                    holding = True
-            elif holding and price > sell_threshold:
-                print(f"Price above ${sell_threshold}! Selling {quantity:.8f} BTC at ${price}")
-                result = place_order(symbol, "SELL", quantity, price)
-                if result:
-                    print(f"Sell order placed: Order ID {result['orderId']}")
-                    holding = False
-            else:
-                print("No action taken.")
-
-            time.sleep(60)  # Check every minute
-        except Exception as e:
-            print(f"Error in bot loop: {e}")
-            time.sleep(60)
-
-# Run the bot
-if __name__ == "__main__":
-    trading_bot()
+    print(f"Placing order with size: {body['size
