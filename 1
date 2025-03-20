@@ -62,10 +62,12 @@ def get_price(symbol="BTC_USDT"):
         print(f"Price API response: {json.dumps(data, indent=2)}")  # Debug output
         if 'data' in data and 'tickers' in data['data'] and data['data']['tickers']:
             ticker = data['data']['tickers'][0]
-            if 'last' in ticker:
-                return float(ticker['last'])
+            if 'close' in ticker:
+                return float(ticker['close'])  # Use 'close' instead of 'last'
+            elif 'last' in ticker:
+                return float(ticker['last'])  # Fallback to 'last' if present
             else:
-                print("Error: 'last' key not found in ticker data")
+                print("Error: Neither 'close' nor 'last' key found in ticker data")
         else:
             print("Error: Unexpected response structure or no tickers")
     else:
