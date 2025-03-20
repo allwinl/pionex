@@ -63,29 +63,21 @@ def get_symbol_info(symbol="BTC_USDT"):
     print(f"Error: Failed to fetch symbol info for {symbol}")
     return None
 
-# Function to get current price
+# Function to get current price using market depth
 def get_price(symbol="BTC_USDT"):
-    endpoint = "/api/v1/market/tickers"
-    params = {"symbols": symbol}
+    endpoint = "/api/v1/market/depth"
+    params = {"symbol": symbol}  # Note: singular 'symbol' for this endpoint
     data = api_request("GET", endpoint, params)
-    if data and 'data' in data and 'tickers' in data['data'] and data['data']['tickers']:
-        ticker = data['data']['tickers'][0]
-        print(f"Raw ticker data: {json.dumps(ticker, indent=2)}")  # Debug output
-        if ticker.get('symbol') != symbol:
-            print(f"Error: API returned data for {ticker.get('symbol')} instead of {symbol}")
-            return None
-        if 'close' in ticker:
-            price = float(ticker['close'])
-            if price < 1000:  # BTC/USDT should be in thousands
-                print(f"Warning: Price ${price} seems too low for {symbol}")
-            return price
-        elif 'last' in ticker:
-            return float(ticker['last'])
-        else:
-            print("Error: Neither 'close' nor 'last' key found")
+    if data and 'data' in data and 'bids' in data['data'] and data['data']['bids']:
+        # Use the top bid price as the current price
+        top_bid = float(data['data']['bids'][0][0])  # [price, quantity]
+        print(f"Top bid price for {symbol}: ${top_bid}")  # Debug output
+        if top_bid < 1000:  # BTC/USDT should be in thousands
+            print(f"Warning: Price ${top_bid} seems too low for {symbol}")
+        return top_bid
     else:
-        print("Error: Failed to fetch price data")
-    return None
+        print("Error: Failed to fetch price data from market depth")
+        return None
 
 # Function to place an order
 def place_order(symbol, side, quantity, price):
