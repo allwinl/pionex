@@ -1,0 +1,113 @@
+import requests
+import time
+import hmac
+import hashlib
+from urllib.parse import urlencode
+import config  # Import config.py for API credentials
+
+# API setup
+BASE_URL = "https://api.pionex.com"
+API_KEY = config.API_KEY
+SECRET_KEY = config.SECRET_KEY
+
+# Function to generate API signature
+def generate_signature(params):
+    query_string = urlencode(sorted(params.items()))
+    return hmac.new(
+        SECRET_KEY.encode('utf-8'),
+        query_string.encode('utf-8'),
+        hashlib.sha256
+    ).hexdigest()
+
+# Function to make authenticated API requests
+def api_request(method, endpoint, params=None):
+    if params is None:
+        params = {}
+    params['key'] = API_KEY
+    params['timestamp'] = int(time.time() * 1000)  # Milliseconds
+    params['signature'] = generate_signature(params)
+
+    url = f"{BASE_URL}{endpoint}"
+    try:
+        if method == "GET":
+            response = requests.get(url, params=params)
+        elif method == "POST":
+            response = requests.post(url, json=params)
+        else:
+            raise ValueError("Unsupported method")
+        response.raise_for_status()  # Raise an error for bad HTTP status codes
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"API request failed: {e}")
+        return None
+
+# Function to get current price
+def get_price(symbol="BTC_USDT"):
+    endpoint = "/api/v1/market/tickers"
+    params = {"symbols": symbol}
+    data = api_request("GET", endpoint, params)
+    if data and 'data' in data and 'tickers' in data['data']:
+        ticker = data['data']['tickers'][0]
+        return float(ticker['last'])
+    else:
+        print("Failed to fetch price")
+        return None
+
+# Function to place an order
+def place_order(symbol, side, quantity, price):
+    endpoint = "/api/v1/trade/order"
+    params = {
+        "symbol": symbol,
+        "side": side.upper(),  # "BUY" or "SELL"
+        "type": "LIMIT",
+        "quantity": str(quantity),
+        "price": str(price)
+    }
+    response = api_request("POST", endpoint, params)
+    if response and 'data' in response:
+        return response
+    else:
+        print(f"Order placement failed: {response}")
+        return None
+
+# Trading bot logic
+def trading_bot():
+    symbol = "BTC_USDT"
+    buy_threshold = 26000  # Buy if price < $26,000
+    sell_threshold = 27000  # Sell if price > $27,000
+    quantity = 0.001       # Amount of BTC to trade
+    holding = False        # Track if we own BTC
+
+    print("Starting Pionex trading bot...")
+    while True:
+        try:
+            price = get_price(symbol)
+            if price is None:
+                time.sleep(60)
+                continue
+
+            print(f"Current {symbol} price: ${price}")
+
+            if not holding and price < buy_threshold:
+                print(f"Price below ${buy_threshold}! Buying {quantity} BTC at ${price}")
+                result = place_order(symbol, "BUY", quantity, price)
+                if result:
+                    print(f"Buy order placed: {result}")
+                    holding = True
+            elif holding and price > sell_threshold:
+                print(f"Price above ${sell_threshold}! Selling {quantity} BTC at ${price}")
+                result = place_order(symbol, "SELL", quantity, price)
+                if result:
+                    print(f"Sell order placed: {result}")
+                    holding = False
+            else:
+                print("No action taken.")
+
+            time.sleep(60)  # Check every minute
+        except Exception as e:
+            print(f"Error in bot loop: {e}")
+            time.sleep(60)
+
+# Run the bot
+if __name__ == "__main__":
+    trading_bot()
