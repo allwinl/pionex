@@ -20,9 +20,8 @@ def generate_signature(method, path, params, body=None):
     path_url = f"{path}?{sorted_params}"
     string_to_sign = f"{method}{path_url}"
     if body:
-        # Remove spaces from JSON body as per Pionex example
         string_to_sign += json.dumps(body, separators=(',', ':'))
-    print(f"String to sign: {string_to_sign}")  # Debug signature string
+    print(f"String to sign: {string_to_sign}")  # Keep this to debug signature
     signature = hmac.new(
         SECRET_KEY.encode('utf-8'),
         string_to_sign.encode('utf-8'),
@@ -60,20 +59,16 @@ def get_price(symbol="BTC_USDT"):
     endpoint = "/api/v1/market/tickers"
     params = {"symbols": symbol}
     data = api_request("GET", endpoint, params)
-    if data:
-        print(f"Price API response: {json.dumps(data, indent=2)}")  # Debug output
-        if 'data' in data and 'tickers' in data['data'] and data['data']['tickers']:
-            ticker = data['data']['tickers'][0]
-            if 'close' in ticker:
-                return float(ticker['close'])
-            elif 'last' in ticker:
-                return float(ticker['last'])
-            else:
-                print("Error: Neither 'close' nor 'last' key found in ticker data")
+    if data and 'data' in data and 'tickers' in data['data'] and data['data']['tickers']:
+        ticker = data['data']['tickers'][0]
+        if 'close' in ticker:
+            return float(ticker['close'])
+        elif 'last' in ticker:
+            return float(ticker['last'])
         else:
-            print("Error: Unexpected response structure or no tickers")
+            print("Error: Neither 'close' nor 'last' key found in ticker data")
     else:
-        print("Error: No data returned from API")
+        print("Error: Failed to fetch price data")
     return None
 
 # Function to place an order
