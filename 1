@@ -20,7 +20,9 @@ def generate_signature(method, path, params, body=None):
     path_url = f"{path}?{sorted_params}"
     string_to_sign = f"{method}{path_url}"
     if body:
+        # Remove spaces from JSON body as per Pionex example
         string_to_sign += json.dumps(body, separators=(',', ':'))
+    print(f"String to sign: {string_to_sign}")  # Debug signature string
     signature = hmac.new(
         SECRET_KEY.encode('utf-8'),
         string_to_sign.encode('utf-8'),
@@ -44,7 +46,7 @@ def api_request(method, endpoint, params=None, body=None):
         if method == "GET":
             response = requests.get(url, headers=headers, params=params)
         elif method == "POST":
-            response = requests.post(url, headers=headers, params=params, data=json.dumps(body))
+            response = requests.post(url, headers=headers, params=params, data=json.dumps(body, separators=(',', ':')))
         else:
             raise ValueError("Unsupported method")
         response.raise_for_status()
@@ -63,9 +65,9 @@ def get_price(symbol="BTC_USDT"):
         if 'data' in data and 'tickers' in data['data'] and data['data']['tickers']:
             ticker = data['data']['tickers'][0]
             if 'close' in ticker:
-                return float(ticker['close'])  # Use 'close' instead of 'last'
+                return float(ticker['close'])
             elif 'last' in ticker:
-                return float(ticker['last'])  # Fallback to 'last' if present
+                return float(ticker['last'])
             else:
                 print("Error: Neither 'close' nor 'last' key found in ticker data")
         else:
