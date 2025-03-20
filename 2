@@ -75,14 +75,14 @@ def get_usdt_pairs():
     print("Error: Failed to fetch USDT pairs")
     return []
 
-# Function to get symbol info
+# Function to get symbol info with error handling
 def get_symbol_info(symbol):
     endpoint = "/api/v1/common/symbols"
     params = {"symbols": symbol}
     data = api_request("GET", endpoint, params)
-    if data and 'data' in data and 'symbols' in data['data']:
+    if data and 'data' in data and 'symbols' in data['data'] and data['data']['symbols']:
         return data['data']['symbols'][0]
-    print(f"Error: Failed to fetch symbol info for {symbol}")
+    print(f"Error: No symbol info returned for {symbol} - Response: {data}")
     return None
 
 # Function to get account balance
@@ -227,7 +227,7 @@ def place_order(symbol, side, quantity, price, precision):
         "IOC": False
     }
     response = api_request("POST", endpoint, params, body)
-    if response and 'data' in response and response['result']:
+    if response and 'data' in data and response['result']:
         return response['data']
     else:
         print(f"Order placement failed: {response}")
@@ -245,13 +245,23 @@ async def trading_bot():
         return
     print(f"Monitoring {len(usdt_pairs)} USDT pairs: {usdt_pairs[:5]}...")
 
-    # Get symbol info for all pairs
-    symbol_info_dict = {symbol: get_symbol_info(symbol) for symbol in usdt_pairs}
+    # Get symbol info for all pairs, filtering out invalid ones
+    symbol_info_dict = {}
+    valid_usdt_pairs = []
+    for symbol in usdt_pairs:
+        info = get_symbol_info(symbol)
+        if info:
+            symbol_info_dict[symbol] = info
+            valid_usdt_pairs.append(symbol)
+        else:
+            print(f"Skipping {symbol} due to invalid symbol info")
+
+    print(f"Valid USDT pairs to monitor: {len(valid_usdt_pairs)}")
 
     print("Starting Pionex trading bot...")
     while True:
         try:
-            for symbol in usdt_pairs:
+            for symbol in valid_usdt_pairs:
                 symbol_info = symbol_info_dict.get(symbol)
                 if not symbol_info:
                     continue
