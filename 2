@@ -104,24 +104,26 @@ def get_price(symbol):
     if data and 'data' in data and 'bids' in data['data'] and data['data']['bids']:
         bid = float(data['data']['bids'][0][0])
         ask = float(data['data']['asks'][0][0])
-        return (bid + ask) / 2  # Midpoint as "close"
+        return (bid + ask) / 2
     print(f"Error: Failed to fetch price data for {symbol}")
     return None
 
-# Simulate historical OHLCV data
+# Simulate historical OHLCV data with more volatility
 def get_historical_data(symbol, interval_minutes=1, limit=50):
     data = []
-    for _ in range(limit):
-        price = get_price(symbol)
-        if price:
-            timestamp = int(time.time() * 1000) - (_ * interval_minutes * 60 * 1000)
-            open_price = price * (1 - 0.001 * _ / limit)
-            high_price = price * (1 + 0.002 * _ / limit)
-            low_price = price * (1 - 0.003 * _ / limit)
-            close_price = price
-            volume = 100  # Placeholder
-            data.append([timestamp, open_price, high_price, low_price, close_price, volume])
-        time.sleep(1)  # Rate limit
+    base_price = get_price(symbol)
+    if not base_price:
+        return pd.DataFrame()
+    for i in range(limit):
+        price = base_price * (1 + 0.005 * (i % 2 - 0.5))  # Alternates ±0.5%
+        timestamp = int(time.time() * 1000) - (i * interval_minutes * 60 * 1000)
+        open_price = price * (1 - 0.002)
+        high_price = price * (1 + 0.003)
+        low_price = price * (1 - 0.004)
+        close_price = price
+        volume = 100  # Placeholder
+        data.append([timestamp, open_price, high_price, low_price, close_price, volume])
+        time.sleep(0.1)  # Reduced delay for testing
     df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     df.set_index('timestamp', inplace=True)
@@ -136,9 +138,13 @@ def calculate_macd(df):
     df['histogram'] = macd.macd_diff()
 
 # Check MACD crossover
-def check_macd_signal_crossover(df):
+def check_macd_signal_crossover(df, symbol):
     if len(df) < 3:
         return False, False
+    # Force a crossover for testing on BTC_USDT (remove after testing)
+    if symbol == "BTC_USDT" and not hasattr(check_macd_signal_crossover, 'tested'):
+        check_macd_signal_crossover.tested = True
+        return True, False  # Simulate a buy signal once
     macd_prev = df['macd'].iloc[-2]
     macd_curr = df['macd'].iloc[-1]
     signal_prev = df['signal'].iloc[-2]
@@ -211,8 +217,12 @@ def plot_candles(df, symbol, title):
 
 # Send Telegram message with chart
 async def send_telegram_message(symbol, message, image_buffer):
-    await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
-    await telegram_bot.send_photo(chat_id=CHAT_ID, photo=image_buffer)
+    try:
+        await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
+        await telegram_bot.send_photo(chat_id=CHAT_ID, photo=image_buffer)
+        print(f"Sent Telegram message and image for {symbol}")
+    except Exception as e:
+        print(f"Failed to send Telegram message for {symbol}: {e}")
 
 # Function to place an order
 def place_order(symbol, side, quantity, price, precision):
@@ -227,7 +237,7 @@ def place_order(symbol, side, quantity, price, precision):
         "IOC": False
     }
     response = api_request("POST", endpoint, params, body)
-    if response and 'data' in data and response['result']:
+    if response and 'data' in response and response['result']:
         return response['data']
     else:
         print(f"Order placement failed: {response}")
@@ -248,7 +258,7 @@ async def trading_bot():
     # Get symbol info for all pairs, filtering out invalid ones
     symbol_info_dict = {}
     valid_usdt_pairs = []
-    for symbol in usdt_pairs:
+    for symbol in usdt_pairs[:5]:  # Limit to 5 pairs for testing
         info = get_symbol_info(symbol)
         if info:
             symbol_info_dict[symbol] = info
@@ -267,12 +277,13 @@ async def trading_bot():
                     continue
 
                 min_amount = float(symbol_info['minAmount'])
-                min_trade_size = float(symbol_info['minTradeSize'])
+                min_trade_size = float(symbol_info['minTradeSize No symbol info returned'])
                 base_precision = int(symbol_info['basePrecision'])
 
                 # Fetch historical data
                 historical_data = get_historical_data(symbol, interval_minutes=1, limit=50)
                 if historical_data.empty:
+                    print(f"{symbol}: No historical data available")
                     continue
 
                 price = get_price(symbol)
@@ -286,18 +297,23 @@ async def trading_bot():
 
                 order_amount = price * quantity
                 if order_amount < min_amount:
-                    print(f"{symbol}: Order amount ${order_amount:.2f} below minimum ${min_amount}. Skipping.")
+                    print(f"{symbol}: Order amount ${order_amount:.2f} below minimum ${min_amount}. Skipping trade.")
                     continue
 
                 # MACD strategy
                 calculate_macd(historical_data)
-                cross_over, cross_under = check_macd_signal_crossover(historical_data)
+                cross_over, cross_under = check_macd_signal_crossover(historical_data, symbol)
                 holding = holdings.get(symbol, False)
 
+                # Send Telegram message and image on crossover, regardless of order
                 if cross_over and not holding:
+                    message = f"#Long #{symbol} - MACD Cross Over"
+                    image_buffer = plot_candles(historical_data, symbol, "MACD Cross Over")
+                    await send_telegram_message(symbol, message, image_buffer)
+
                     usdt_balance = get_balance("USDT")
                     if usdt_balance < order_amount:
-                        print(f"{symbol}: Insufficient USDT (${usdt_balance:.2f} < ${order_amount:.2f}). Skipping.")
+                        print(f"{symbol}: Insufficient USDT (${usdt_balance:.2f} < ${order_amount:.2f}). Skipping trade.")
                         continue
 
                     print(f"{symbol}: MACD Cross Over! Buying {quantity:.8f} at ${price}")
@@ -305,27 +321,29 @@ async def trading_bot():
                     if result:
                         print(f"{symbol}: Buy order placed: Order ID {result['orderId']}")
                         holdings[symbol] = True
-                        message = f"#Long #{symbol} - MACD Cross Over"
-                        image_buffer = plot_candles(historical_data, symbol, "MACD Cross Over")
-                        await send_telegram_message(symbol, message, image_buffer)
+                    else:
+                        print(f"{symbol}: Buy order failed, but signal sent")
 
                 elif cross_under and holding:
+                    message = f"#Short #{symbol} - MACD Cross Under"
+                    image_buffer = plot_candles(historical_data, symbol, "MACD Cross Under")
+                    await send_telegram_message(symbol, message, image_buffer)
+
                     print(f"{symbol}: MACD Cross Under! Selling {quantity:.8f} at ${price}")
                     result = place_order(symbol, "SELL", quantity, price, base_precision)
                     if result:
                         print(f"{symbol}: Sell order placed: Order ID {result['orderId']}")
                         holdings[symbol] = False
-                        message = f"#Short #{symbol} - MACD Cross Under"
-                        image_buffer = plot_candles(historical_data, symbol, "MACD Cross Under")
-                        await send_telegram_message(symbol, message, image_buffer)
+                    else:
+                        print(f"{symbol}: Sell order failed, but signal sent")
 
                 else:
                     print(f"{symbol}: Current price: ${price} - No action (Holding: {holding})")
 
-            await asyncio.sleep(60)  # Check all pairs every minute
+            await asyncio.sleep(10)  # Reduced sleep for testing
         except Exception as e:
             print(f"Error in bot loop: {e}")
-            await asyncio.sleep(60)
+            await asyncio.sleep(10)
 
 # Run the bot
 if __name__ == "__main__":
