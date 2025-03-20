@@ -13,49 +13,33 @@ SECRET_KEY = config.SECRET_KEY
 
 # Function to generate HMAC SHA256 signature
 def generate_signature(method, path, params, body=None):
-    # Step 1: Get current timestamp in milliseconds
     timestamp = str(int(time.time() * 1000))
-    
-    # Step 2 & 3: Sort query parameters and concatenate with &
     query_params = params.copy()
     query_params['timestamp'] = timestamp
     sorted_params = urlencode(sorted(query_params.items()))
-    
-    # Step 4: Concatenate PATH with query string
     path_url = f"{path}?{sorted_params}"
-    
-    # Step 5: Concatenate METHOD and PATH_URL
     string_to_sign = f"{method}{path_url}"
-    
-    # Step 6: Append body if POST or DELETE (for POST /trade/order)
     if body:
         string_to_sign += json.dumps(body, separators=(',', ':'))
-    
-    # Step 7: Generate HMAC SHA256 signature with secret key
     signature = hmac.new(
         SECRET_KEY.encode('utf-8'),
         string_to_sign.encode('utf-8'),
         hashlib.sha256
     ).hexdigest()
-    
     return signature, timestamp
 
 # Function to make authenticated API requests
 def api_request(method, endpoint, params=None, body=None):
     if params is None:
         params = {}
-    
-    # Generate signature and timestamp
     signature, timestamp = generate_signature(method, endpoint, params, body)
     params['timestamp'] = timestamp
-    
     url = f"{BASE_URL}{endpoint}"
     headers = {
         "PIONEX-KEY": API_KEY,
         "PIONEX-SIGNATURE": signature,
         "Content-Type": "application/json"
     }
-    
     try:
         if method == "GET":
             response = requests.get(url, headers=headers, params=params)
@@ -74,24 +58,31 @@ def get_price(symbol="BTC_USDT"):
     endpoint = "/api/v1/market/tickers"
     params = {"symbols": symbol}
     data = api_request("GET", endpoint, params)
-    if data and 'data' in data and 'tickers' in data['data']:
-        ticker = data['data']['tickers'][0]
-        return float(ticker['last'])
+    if data:
+        print(f"Price API response: {json.dumps(data, indent=2)}")  # Debug output
+        if 'data' in data and 'tickers' in data['data'] and data['data']['tickers']:
+            ticker = data['data']['tickers'][0]
+            if 'last' in ticker:
+                return float(ticker['last'])
+            else:
+                print("Error: 'last' key not found in ticker data")
+        else:
+            print("Error: Unexpected response structure or no tickers")
     else:
-        print("Failed to fetch price")
-        return None
+        print("Error: No data returned from API")
+    return None
 
 # Function to place an order
 def place_order(symbol, side, quantity, price):
     endpoint = "/api/v1/trade/order"
-    params = {}  # Query params (timestamp added by api_request)
+    params = {}
     body = {
         "symbol": symbol,
-        "side": side.upper(),  # "BUY" or "SELL"
+        "side": side.upper(),
         "type": "LIMIT",
-        "size": str(quantity),  # Quantity as string
-        "price": str(price),   # Price as string
-        "IOC": False           # Immediate or Cancel (optional)
+        "size": str(quantity),
+        "price": str(price),
+        "IOC": False
     }
     response = api_request("POST", endpoint, params, body)
     if response and 'data' in response and response['result']:
