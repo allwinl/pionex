@@ -63,21 +63,28 @@ def get_symbol_info(symbol="BTC_USDT"):
     print(f"Error: Failed to fetch symbol info for {symbol}")
     return None
 
+# Function to get account balance
+def get_balance(currency="USDT"):
+    endpoint = "/api/v1/account/balances"
+    params = {}
+    data = api_request("GET", endpoint, params)
+    if data and 'data' in data and 'balances' in data['data']:
+        for balance in data['data']['balances']:
+            if balance['coin'] == currency:
+                return float(balance['free'])
+    print(f"Error: Failed to fetch balance for {currency}")
+    return 0.0
+
 # Function to get current price using market depth
 def get_price(symbol="BTC_USDT"):
     endpoint = "/api/v1/market/depth"
-    params = {"symbol": symbol}  # Note: singular 'symbol' for this endpoint
+    params = {"symbol": symbol}
     data = api_request("GET", endpoint, params)
     if data and 'data' in data and 'bids' in data['data'] and data['data']['bids']:
-        # Use the top bid price as the current price
         top_bid = float(data['data']['bids'][0][0])  # [price, quantity]
-        print(f"Top bid price for {symbol}: ${top_bid}")  # Debug output
-        if top_bid < 1000:  # BTC/USDT should be in thousands
-            print(f"Warning: Price ${top_bid} seems too low for {symbol}")
         return top_bid
-    else:
-        print("Error: Failed to fetch price data from market depth")
-        return None
+    print("Error: Failed to fetch price data from market depth")
+    return None
 
 # Function to place an order
 def place_order(symbol, side, quantity, price):
@@ -103,7 +110,7 @@ def trading_bot():
     symbol = "BTC_USDT"
     buy_threshold = 86000  # Buy if price < $86,000
     sell_threshold = 88000  # Sell if price > $88,000
-    quantity = 0.001       # Amount of BTC to trade
+    target_usdt = 15.0     # Target $15 worth of BTC per trade
     holding = False        # Track if we own BTC
 
     # Get symbol info to validate trading parameters
@@ -112,7 +119,9 @@ def trading_bot():
         print("Bot stopped due to symbol info failure")
         return
     min_amount = float(symbol_info['minAmount'])  # e.g., 10 USDT
+    min_trade_size = float(symbol_info['minTradeSize'])  # e.g., 0.000001 BTC
     print(f"Minimum order amount for {symbol}: ${min_amount}")
+    print(f"Minimum trade size for {symbol}: {min_trade_size} BTC")
 
     print("Starting Pionex trading bot...")
     while True:
@@ -122,23 +131,37 @@ def trading_bot():
                 time.sleep(60)
                 continue
 
-            print(f"Current {symbol} price: ${price}")
+            # Calculate quantity for $15 worth of BTC
+            quantity = target_usdt / price
+            if quantity < min_trade_size:
+                quantity = min_trade_size  # Ensure at least minimum trade size
 
-            # Check if order meets minimum amount
+            print(f"Current {symbol} price: ${price}")
+            print(f"Calculated quantity: {quantity:.8f} BTC (${quantity * price:.2f})")
+
+            # Check balance and minimum amount
             order_amount = price * quantity
             if order_amount < min_amount:
-                print(f"Order amount ${order_amount} below minimum ${min_amount}. Skipping trade.")
+                print(f"Order amount ${order_amount:.2f} below minimum ${min_amount}. Skipping trade.")
                 time.sleep(60)
                 continue
 
+            if not holding:
+                usdt_balance = get_balance("USDT")
+                print(f"Available USDT balance: ${usdt_balance:.2f}")
+                if usdt_balance < order_amount:
+                    print(f"Insufficient USDT (${usdt_balance:.2f} < ${order_amount:.2f}). Skipping trade.")
+                    time.sleep(60)
+                    continue
+
             if not holding and price < buy_threshold:
-                print(f"Price below ${buy_threshold}! Buying {quantity} BTC at ${price}")
+                print(f"Price below ${buy_threshold}! Buying {quantity:.8f} BTC at ${price}")
                 result = place_order(symbol, "BUY", quantity, price)
                 if result:
                     print(f"Buy order placed: Order ID {result['orderId']}")
                     holding = True
             elif holding and price > sell_threshold:
-                print(f"Price above ${sell_threshold}! Selling {quantity} BTC at ${price}")
+                print(f"Price above ${sell_threshold}! Selling {quantity:.8f} BTC at ${price}")
                 result = place_order(symbol, "SELL", quantity, price)
                 if result:
                     print(f"Sell order placed: Order ID {result['orderId']}")
