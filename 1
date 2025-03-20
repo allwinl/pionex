@@ -21,7 +21,7 @@ def generate_signature(method, path, params, body=None):
     string_to_sign = f"{method}{path_url}"
     if body:
         string_to_sign += json.dumps(body, separators=(',', ':'))
-    print(f"String to sign: {string_to_sign}")  # Keep this to debug signature
+    print(f"String to sign: {string_to_sign}")  # Temporary debug
     signature = hmac.new(
         SECRET_KEY.encode('utf-8'),
         string_to_sign.encode('utf-8'),
@@ -61,12 +61,18 @@ def get_price(symbol="BTC_USDT"):
     data = api_request("GET", endpoint, params)
     if data and 'data' in data and 'tickers' in data['data'] and data['data']['tickers']:
         ticker = data['data']['tickers'][0]
+        if ticker.get('symbol') != symbol:
+            print(f"Error: API returned data for {ticker.get('symbol')} instead of {symbol}")
+            return None
         if 'close' in ticker:
-            return float(ticker['close'])
+            price = float(ticker['close'])
+            if price < 1000:  # BTC/USDT should be in thousands
+                print(f"Warning: Price ${price} seems too low for {symbol}")
+            return price
         elif 'last' in ticker:
             return float(ticker['last'])
         else:
-            print("Error: Neither 'close' nor 'last' key found in ticker data")
+            print("Error: Neither 'close' nor 'last' key found")
     else:
         print("Error: Failed to fetch price data")
     return None
