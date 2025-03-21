@@ -390,9 +390,12 @@ async def run_alert_loop(application: Application):
 
 async def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
-    application.add_handler(CallbackQueryHandler(handle_telegram_callback, pattern='^buy\|'))
+    application.add_handler(CallbackQueryHandler(handle_telegram_callback, pattern=r'^buy\|'))  # Fixed escape sequence
+    await application.initialize()
+    await application.start()
     asyncio.create_task(run_alert_loop(application))
-    await application.run_polling(allowed_updates=Update.ALL_TYPES)
+    await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+    await application.run_polling()
 
 if __name__ == '__main__':
     nest_asyncio.apply()
