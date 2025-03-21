@@ -12,6 +12,7 @@ import asyncio
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CallbackQueryHandler
 import ta
+import pytz  # Add pytz for timezone support
 import config  # Import config.py for API credentials
 
 # API setup
@@ -424,7 +425,8 @@ async def trading_bot():
 
 # Main function to run bot and Telegram handler
 async def main():
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    # Explicitly set timezone to UTC using pytz
+    application = Application.builder().token(TELEGRAM_TOKEN).job_queue_timezone(pytz.UTC).build()
     application.add_handler(CallbackQueryHandler(handle_buy_callback, pattern='^buy_'))
 
     # Start the trading bot
