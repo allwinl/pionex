@@ -12,7 +12,7 @@ import asyncio
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CallbackQueryHandler
 import ta
-import pytz  # Add pytz for timezone support
+import pytz
 import config  # Import config.py for API credentials
 
 # API setup
@@ -23,7 +23,7 @@ TELEGRAM_TOKEN = config.TELEGRAM_TOKEN_RSI
 CHAT_ID = config.CHAT_ID
 
 # Telegram setup
-bot = Bot(token=TELEGRAM_TOKEN)
+telegram_bot = Bot(token=TELEGRAM_TOKEN)
 
 # Global storage
 last_alert_messages = {}
@@ -221,13 +221,17 @@ def plot_candles(df, symbol, title):
     plt.close(fig)
     return buf
 
-# Send Telegram message with chart and Buy button
-async def send_telegram_message(symbol, message, image_buffer):
+# Function to send Telegram message with chart and Buy button (inspired by reference)
+async def send_telegram_message(symbol, message, image_buffer=None):
     try:
-        keyboard = [[InlineKeyboardButton("Buy", callback_data=f"buy_{symbol}")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await bot.send_photo(chat_id=CHAT_ID, photo=image_buffer, caption=message, reply_markup=reply_markup)
-        print(f"Sent Telegram message and image for {symbol} with Buy option")
+        if image_buffer:
+            keyboard = [[InlineKeyboardButton("Buy", callback_data=f"buy_{symbol}")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await telegram_bot.send_photo(chat_id=CHAT_ID, photo=image_buffer, caption=message, reply_markup=reply_markup)
+            print(f"Sent Telegram message and image for {symbol} with Buy option")
+        else:
+            await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
+            print(f"Sent Telegram message for {symbol}")
     except Exception as e:
         print(f"Failed to send Telegram message for {symbol}: {e}")
 
@@ -288,7 +292,7 @@ async def handle_buy_callback(update, context):
 
     symbol_info = get_symbol_info(symbol)
     if not symbol_info:
-        await bot.send_message(chat_id=CHAT_ID, text=f"Error: Invalid symbol info for {symbol}")
+        await telegram_bot.send_message(chat_id=CHAT_ID, text=f"Error: Invalid symbol info for {symbol}")
         return
 
     min_amount = float(symbol_info['minAmount'])
@@ -297,7 +301,7 @@ async def handle_buy_callback(update, context):
 
     price = get_price(symbol)
     if not price:
-        await bot.send_message(chat_id=CHAT_ID, text=f"Error: Could not fetch price for {symbol}")
+        await telegram_bot.send_message(chat_id=CHAT_ID, text=f"Error: Could not fetch price for {symbol}")
         return
 
     quantity = target_usdt / price
@@ -306,12 +310,12 @@ async def handle_buy_callback(update, context):
 
     order_amount = price * quantity
     if order_amount < min_amount:
-        await bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Order amount ${order_amount:.2f} below minimum ${min_amount}")
+        await telegram_bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Order amount ${order_amount:.2f} below minimum ${min_amount}")
         return
 
     usdt_balance = get_balance("USDT")
     if usdt_balance < order_amount:
-        await bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Insufficient USDT (${usdt_balance:.2f} < ${order_amount:.2f})")
+        await telegram_bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Insufficient USDT (${usdt_balance:.2f} < ${order_amount:.2f})")
         return
 
     # Place buy order
@@ -320,7 +324,7 @@ async def handle_buy_callback(update, context):
         order_id = buy_result['orderId']
         print(f"{symbol}: Buy order placed: Order ID {order_id}")
         last_alert_messages[symbol] = "buy"
-        await bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Buy order placed: Order ID {order_id}")
+        await telegram_bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Buy order placed: Order ID {order_id}")
 
         # Place auto sell order at 1.01x price
         sell_price = price * 1.01
@@ -329,11 +333,11 @@ async def handle_buy_callback(update, context):
             sell_order_id = sell_result['orderId']
             pending_orders[symbol] = sell_order_id
             print(f"{symbol}: Auto sell order placed at ${sell_price:.2f}: Order ID {sell_order_id}")
-            await bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Auto sell order placed at ${sell_price:.2f}: Order ID {sell_order_id}")
+            await telegram_bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Auto sell order placed at ${sell_price:.2f}: Order ID {sell_order_id}")
         else:
-            await bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Failed to place auto sell order")
+            await telegram_bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Failed to place auto sell order")
     else:
-        await bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Buy order failed")
+        await telegram_bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Buy order failed")
 
 # Trading bot logic for all USDT pairs
 async def trading_bot():
@@ -411,9 +415,9 @@ async def trading_bot():
                     if sell_result:
                         print(f"{symbol}: Market sell order placed: Order ID {sell_result['orderId']}")
                         last_alert_messages[symbol] = "sold"
-                        await bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Market sell order placed: Order ID {sell_result['orderId']}")
+                        await telegram_bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Market sell order placed: Order ID {sell_result['orderId']}")
                     else:
-                        await bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Market sell order failed")
+                        await telegram_bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Market sell order failed")
 
                 else:
                     print(f"{symbol}: Current price: ${price} - No action (Holding: {holding})")
@@ -425,7 +429,6 @@ async def trading_bot():
 
 # Main function to run bot and Telegram handler
 async def main():
-    # Explicitly set timezone to UTC using pytz
     application = Application.builder().token(TELEGRAM_TOKEN).job_queue_timezone(pytz.UTC).build()
     application.add_handler(CallbackQueryHandler(handle_buy_callback, pattern='^buy_'))
 
