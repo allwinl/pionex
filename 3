@@ -1,0 +1,94 @@
+import requests
+import time
+import hmac
+import hashlib
+from urllib.parse import urlencode
+import json
+import pandas as pd
+import matplotlib.pyplot as plt
+import mplfinance as mpf
+from io import BytesIO
+import asyncio
+import nest_asyncio
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+import ta
+import config
+
+# Apply nest_asyncio for Jupyter or nested loops
+nest_asyncio.apply()
+
+# API setup
+BASE_URL = "https://api.pionex.com"
+API_KEY = config.API_KEY
+SECRET_KEY = config.SECRET_KEY
+TELEGRAM_TOKEN = config.TELEGRAM_TOKEN_RSI
+CHAT_ID = config.CHAT_ID
+
+# Initialize Telegram bot application
+app = Application.builder().token(TELEGRAM_TOKEN).build()
+
+def generate_signature(method, path, params, body=None):
+    timestamp = str(int(time.time() * 1000))
+    query_params = params.copy()
+    query_params['timestamp'] = timestamp
+    sorted_params = urlencode(sorted(query_params.items()))
+    path_url = f"{path}?{sorted_params}"
+    string_to_sign = f"{method}{path_url}"
+    if body:
+        string_to_sign += json.dumps(body, separators=(',', ':'))
+    signature = hmac.new(
+        SECRET_KEY.encode('utf-8'),
+        string_to_sign.encode('utf-8'),
+        hashlib.sha256
+    ).hexdigest()
+    return signature, timestamp
+
+def fetch_ohlcv(symbol, interval, limit=100):
+    url = f"{BASE_URL}/api/v1/market/kline"
+    params = {"symbol": symbol, "interval": interval, "limit": limit}
+    response = requests.get(url, params=params)
+    data = response.json()
+    return pd.DataFrame(data['data'], columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+
+def calculate_indicators(df):
+    df['close'] = df['close'].astype(float)
+    df['ema_10'] = ta.trend.ema_indicator(df['close'], window=10)
+    df['ema_20'] = ta.trend.ema_indicator(df['close'], window=20)
+    df['rsi'] = ta.momentum.rsi(df['close'], window=14)
+    return df
+
+def generate_chart(df, symbol):
+    fig, ax = plt.subplots()
+    df.index = pd.to_datetime(df['timestamp'], unit='ms')
+    mpf.plot(df, type='candle', style='charles', ax=ax)
+    buffer = BytesIO()
+    plt.savefig(buffer, format='png')
+    buffer.seek(0)
+    return buffer
+
+async def send_telegram_message(symbol, message, image_buffer=None):
+    try:
+        keyboard = [[InlineKeyboardButton("Buy", callback_data=f"buy_{symbol}")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        if image_buffer:
+            await app.bot.send_photo(chat_id=CHAT_ID, photo=image_buffer, caption=message, reply_markup=reply_markup)
+        else:
+            await app.bot.send_message(chat_id=CHAT_ID, text=message, reply_markup=reply_markup)
+    except Exception as e:
+        print(f"Failed to send message: {e}")
+
+async def callback_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    symbol = query.data.split("_")[1]
+    await query.message.reply_text(f"Placing a buy order for {symbol}...")
+
+app.add_handler(CallbackQueryHandler(callback_buy))
+
+async def main():
+    await app.run_polling()
+
+if __name__ == "__main__":
+    asyncio.run(main())
