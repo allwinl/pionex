@@ -14,6 +14,15 @@ from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Updater, CallbackQueryHandler, CallbackContext
 import ta
 import config  # Import config.py for API credentials
+import logging
+import warnings
+
+# Suppress urllib3 warning
+warnings.filterwarnings("ignore", category=UserWarning, module="telegram.utils.request")
+
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Apply nest_asyncio to allow nested event loops
 nest_asyncio.apply()
@@ -71,7 +80,7 @@ def api_request(method, endpoint, params=None, body=None):
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
-        print(f"API request failed: {e}")
+        logger.error(f"API request failed: {e}")
         return None
 
 # Function to get all USDT pairs
@@ -81,7 +90,7 @@ def get_usdt_pairs():
     if data and 'data' in data and 'symbols' in data['data']:
         usdt_pairs = [s['symbol'] for s in data['data']['symbols'] if s['symbol'].endswith('_USDT') and s['enable']]
         return usdt_pairs
-    print("Error: Failed to fetch USDT pairs")
+    logger.error("Failed to fetch USDT pairs")
     return []
 
 # Function to get symbol info with error handling
@@ -91,7 +100,7 @@ def get_symbol_info(symbol):
     data = api_request("GET", endpoint, params)
     if data and 'data' in data and 'symbols' in data['data'] and data['data']['symbols']:
         return data['data']['symbols'][0]
-    print(f"Error: No symbol info returned for {symbol} - Response: {data}")
+    logger.error(f"No symbol info returned for {symbol} - Response: {data}")
     return None
 
 # Function to get account balance
@@ -102,7 +111,7 @@ def get_balance(currency="USDT"):
         for balance in data['data']['balances']:
             if balance['coin'] == currency:
                 return float(balance['free'])
-    print(f"Error: Failed to fetch balance for {currency}")
+    logger.error(f"Failed to fetch balance for {currency}")
     return 0.0
 
 # Function to get current price
@@ -114,7 +123,7 @@ def get_price(symbol):
         bid = float(data['data']['bids'][0][0])
         ask = float(data['data']['asks'][0][0])
         return (bid + ask) / 2
-    print(f"Error: Failed to fetch price data for {symbol}")
+    logger.error(f"Failed to fetch price data for {symbol}")
     return None
 
 # Simulate historical OHLCV data with more volatility
@@ -235,8 +244,7 @@ async def send_telegram_message(symbol, message, image_buffer, close_price):
 
         await telegram_bot.send_message(chat_id=CHAT_ID, text=message, reply_markup=reply_markup)
         await telegram_bot.send_photo(chat_id=CHAT_ID, photo=image_buffer)
-        print(f"Sent Telegram message and image for {symbol} with Buy option")
-
+        logger.info(f"Sent Telegram message and image for {symbol} with Buy option")
         last_alert_messages[symbol] = unique_key
 
 # Function to place a limit order
@@ -255,7 +263,7 @@ def place_limit_order(symbol, side, quantity, price, precision):
     if response and 'data' in response and response['result']:
         return response['data']
     else:
-        print(f"Order placement failed: {response}")
+        logger.error(f"Order placement failed: {response}")
         return None
 
 # Function to place a market sell order
@@ -272,7 +280,7 @@ def place_market_sell_order(symbol, quantity, precision):
     if response and 'data' in response and response['result']:
         return response['data']
     else:
-        print(f"Market sell order failed: {response}")
+        logger.error(f"Market sell order failed: {response}")
         return None
 
 # Function to cancel an order
@@ -281,10 +289,10 @@ def cancel_order(symbol, order_id):
     params = {"symbol": symbol, "orderId": order_id}
     response = api_request("DELETE", endpoint, params)
     if response and 'result' in response and response['result']:
-        print(f"Canceled order {order_id} for {symbol}")
+        logger.info(f"Canceled order {order_id} for {symbol}")
         return True
     else:
-        print(f"Failed to cancel order {order_id} for {symbol}: {response}")
+        logger.error(f"Failed to cancel order {order_id} for {symbol}: {response}")
         return False
 
 # Handle Telegram callback (single "Buy" action)
@@ -295,6 +303,7 @@ def handle_telegram_callback(update: Update, context: CallbackContext):
 
     if len(data) < 3:
         context.bot.send_message(chat_id=CHAT_ID, text="Invalid command format.")
+        logger.error("Invalid callback data format")
         return
 
     action, symbol, close_price = data[0], data[1], float(data[2])
@@ -317,11 +326,13 @@ def handle_telegram_callback(update: Update, context: CallbackContext):
     order_amount = price * quantity
     if order_amount < min_amount:
         context.bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Order amount ${order_amount:.2f} below minimum ${min_amount}")
+        logger.warning(f"{symbol}: Order amount ${order_amount:.2f} below minimum ${min_amount}")
         return
 
     usdt_balance = get_balance("USDT")
     if usdt_balance < order_amount:
         context.bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Insufficient USDT (${usdt_balance:.2f} < ${order_amount:.2f})")
+        logger.warning(f"{symbol}: Insufficient USDT (${usdt_balance:.2f} < ${order_amount:.2f})")
         return
 
     if action == "buy":
@@ -329,7 +340,7 @@ def handle_telegram_callback(update: Update, context: CallbackContext):
         buy_result = place_limit_order(symbol, "BUY", quantity, price, base_precision)
         if buy_result:
             order_id = buy_result['orderId']
-            print(f"{symbol}: Buy order placed: Order ID {order_id}")
+            logger.info(f"{symbol}: Buy order placed: Order ID {order_id}")
             last_alert_messages[symbol] = "buy"
             context.bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Buy order placed: Order ID {order_id}")
 
@@ -339,7 +350,7 @@ def handle_telegram_callback(update: Update, context: CallbackContext):
             if sell_result:
                 sell_order_id = sell_result['orderId']
                 pending_orders[symbol] = sell_order_id
-                print(f"{symbol}: Auto sell order placed at ${sell_price:.2f}: Order ID {sell_order_id}")
+                logger.info(f"{symbol}: Auto sell order placed at ${sell_price:.2f}: Order ID {sell_order_id}")
                 context.bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Auto sell order placed at ${sell_price:.2f}: Order ID {sell_order_id}")
             else:
                 context.bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Failed to place auto sell order")
@@ -350,12 +361,12 @@ def handle_telegram_callback(update: Update, context: CallbackContext):
 async def trading_bot(updater):
     target_usdt = 15.0
 
-    # Get all USDT pairs
+    logger.info("Fetching USDT pairs...")
     usdt_pairs = get_usdt_pairs()
     if not usdt_pairs:
-        print("No USDT pairs found. Stopping bot.")
+        logger.error("No USDT pairs found. Stopping bot.")
         return
-    print(f"Monitoring {len(usdt_pairs)} USDT pairs: {usdt_pairs[:5]}...")
+    logger.info(f"Monitoring {len(usdt_pairs)} USDT pairs: {usdt_pairs[:5]}...")
 
     # Get symbol info for all pairs, filtering out invalid ones
     symbol_info_dict = {}
@@ -366,11 +377,11 @@ async def trading_bot(updater):
             symbol_info_dict[symbol] = info
             valid_usdt_pairs.append(symbol)
         else:
-            print(f"Skipping {symbol} due to invalid symbol info")
+            logger.warning(f"Skipping {symbol} due to invalid symbol info")
 
-    print(f"Valid USDT pairs to monitor: {len(valid_usdt_pairs)}")
+    logger.info(f"Valid USDT pairs to monitor: {len(valid_usdt_pairs)}")
 
-    print("Starting Pionex trading bot...")
+    logger.info("Starting Pionex trading bot...")
     while True:
         try:
             for symbol in valid_usdt_pairs:
@@ -385,7 +396,7 @@ async def trading_bot(updater):
                 # Fetch historical data
                 historical_data = get_historical_data(symbol, interval_minutes=1, limit=50)
                 if historical_data.empty:
-                    print(f"{symbol}: No historical data available")
+                    logger.warning(f"{symbol}: No historical data available")
                     continue
 
                 price = get_price(symbol)
@@ -398,7 +409,7 @@ async def trading_bot(updater):
 
                 order_amount = price * quantity
                 if order_amount < min_amount:
-                    print(f"{symbol}: Order amount ${order_amount:.2f} below minimum ${min_amount}. Skipping.")
+                    logger.info(f"{symbol}: Order amount ${order_amount:.2f} below minimum ${min_amount}. Skipping.")
                     continue
 
                 # MACD strategy
@@ -417,25 +428,26 @@ async def trading_bot(updater):
                         if cancel_order(symbol, order_id):
                             del pending_orders[symbol]
 
-                    print(f"{symbol}: MACD Cross Under! Selling {quantity:.8f} at market price")
+                    logger.info(f"{symbol}: MACD Cross Under! Selling {quantity:.8f} at market price")
                     sell_result = place_market_sell_order(symbol, quantity, base_precision)
                     if sell_result:
-                        print(f"{symbol}: Market sell order placed: Order ID {sell_result['orderId']}")
+                        logger.info(f"{symbol}: Market sell order placed: Order ID {sell_result['orderId']}")
                         last_alert_messages[symbol] = "sold"
                         await telegram_bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Market sell order placed: Order ID {sell_result['orderId']}")
                     else:
                         await telegram_bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Market sell order failed")
 
                 else:
-                    print(f"{symbol}: Current price: ${price} - No action (Holding: {holding})")
+                    logger.info(f"{symbol}: Current price: ${price} - No action (Holding: {holding})")
 
             await asyncio.sleep(10)
         except Exception as e:
-            print(f"Error in bot loop: {e}")
+            logger.error(f"Error in bot loop: {e}")
             await asyncio.sleep(10)
 
 # Main function to run bot and Telegram handler
 def main():
+    logger.info("Starting main function...")
     updater = Updater(TELEGRAM_TOKEN, use_context=True)
     dp = updater.dispatcher
     dp.add_handler(CallbackQueryHandler(handle_telegram_callback, pattern='^buy_'))
@@ -444,6 +456,7 @@ def main():
     asyncio.ensure_future(trading_bot(updater))
 
     # Start polling Telegram
+    logger.info("Starting Telegram polling...")
     updater.start_polling()
     updater.idle()
 
