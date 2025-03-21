@@ -1,0 +1,6 @@
+from telegram import Bot
+import asyncio
+async def test():
+    bot = Bot("YOUR_TELEGRAM_TOKEN")
+    await bot.send_message(chat_id="YOUR_CHAT_ID", text="Test")
+asyncio.run(test())
