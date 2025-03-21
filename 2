@@ -10,7 +10,8 @@ import mplfinance as mpf
 from io import BytesIO
 import asyncio
 import nest_asyncio
-from telegram import Bot
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import CallbackContext, CommandHandler, Updater, CallbackQueryHandler
 import ta
 import config  # Import config.py for API credentials
 
@@ -24,6 +25,10 @@ CHAT_ID = config.CHAT_ID  # Add to config.py
 # Telegram setup
 telegram_bot = Bot(token=TELEGRAM_TOKEN)
 nest_asyncio.apply()
+
+# Global storage
+last_alert_messages = {}  # Store last alert message per symbol
+pending_orders = {}  # Store order IDs for cancellation (e.g., limit sell orders)
 
 # Function to generate HMAC SHA256 signature
 def generate_signature(method, path, params, body=None):
@@ -59,6 +64,8 @@ def api_request(method, endpoint, params=None, body=None):
             response = requests.get(url, headers=headers, params=params)
         elif method == "POST":
             response = requests.post(url, headers=headers, params=params, data=json.dumps(body, separators=(',', ':')))
+        elif method == "DELETE":
+            response = requests.delete(url, headers=headers, params=params)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
@@ -123,7 +130,7 @@ def get_historical_data(symbol, interval_minutes=1, limit=50):
         close_price = price
         volume = 100  # Placeholder
         data.append([timestamp, open_price, high_price, low_price, close_price, volume])
-        time.sleep(0.1)  # Reduced delay for testing
+        time.sleep(0.1)
     df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     df.set_index('timestamp', inplace=True)
@@ -215,17 +222,18 @@ def plot_candles(df, symbol, title):
     plt.close(fig)
     return buf
 
-# Send Telegram message with chart
+# Send Telegram message with chart and Buy button
 async def send_telegram_message(symbol, message, image_buffer):
     try:
-        await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
-        await telegram_bot.send_photo(chat_id=CHAT_ID, photo=image_buffer)
-        print(f"Sent Telegram message and image for {symbol}")
+        keyboard = [[InlineKeyboardButton("Buy", callback_data=f"buy_{symbol}")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await telegram_bot.send_photo(chat_id=CHAT_ID, photo=image_buffer, caption=message, reply_markup=reply_markup)
+        print(f"Sent Telegram message and image for {symbol} with Buy option")
     except Exception as e:
         print(f"Failed to send Telegram message for {symbol}: {e}")
 
-# Function to place an order
-def place_order(symbol, side, quantity, price, precision):
+# Function to place a limit order
+def place_limit_order(symbol, side, quantity, price, precision):
     endpoint = "/api/v1/trade/order"
     params = {}
     body = {
@@ -243,9 +251,94 @@ def place_order(symbol, side, quantity, price, precision):
         print(f"Order placement failed: {response}")
         return None
 
+# Function to place a market sell order
+def place_market_sell_order(symbol, quantity, precision):
+    endpoint = "/api/v1/trade/order"
+    params = {}
+    body = {
+        "symbol": symbol,
+        "side": "SELL",
+        "type": "MARKET",
+        "size": f"{quantity:.{precision}f}"
+    }
+    response = api_request("POST", endpoint, params, body)
+    if response and 'data' in response and response['result']:
+        return response['data']
+    else:
+        print(f"Market sell order failed: {response}")
+        return None
+
+# Function to cancel an order
+def cancel_order(symbol, order_id):
+    endpoint = "/api/v1/trade/order"
+    params = {"symbol": symbol, "orderId": order_id}
+    response = api_request("DELETE", endpoint, params)
+    if response and 'result' in response and response['result']:
+        print(f"Canceled order {order_id} for {symbol}")
+        return True
+    else:
+        print(f"Failed to cancel order {order_id} for {symbol}: {response}")
+        return False
+
+# Handle Telegram callback (Buy button)
+def handle_buy_callback(update, context):
+    query = update.callback_query
+    query.answer()
+    symbol = query.data.split("_")[1]  # e.g., "buy_BTC_USDT" -> "BTC_USDT"
+    target_usdt = 15.0
+
+    symbol_info = get_symbol_info(symbol)
+    if not symbol_info:
+        context.bot.send_message(chat_id=CHAT_ID, text=f"Error: Invalid symbol info for {symbol}")
+        return
+
+    min_amount = float(symbol_info['minAmount'])
+    min_trade_size = float(symbol_info['minTradeSize'])
+    base_precision = int(symbol_info['basePrecision'])
+
+    price = get_price(symbol)
+    if not price:
+        context.bot.send_message(chat_id=CHAT_ID, text=f"Error: Could not fetch price for {symbol}")
+        return
+
+    quantity = target_usdt / price
+    if quantity < min_trade_size:
+        quantity = min_trade_size
+
+    order_amount = price * quantity
+    if order_amount < min_amount:
+        context.bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Order amount ${order_amount:.2f} below minimum ${min_amount}")
+        return
+
+    usdt_balance = get_balance("USDT")
+    if usdt_balance < order_amount:
+        context.bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Insufficient USDT (${usdt_balance:.2f} < ${order_amount:.2f})")
+        return
+
+    # Place buy order
+    buy_result = place_limit_order(symbol, "BUY", quantity, price, base_precision)
+    if buy_result:
+        order_id = buy_result['orderId']
+        print(f"{symbol}: Buy order placed: Order ID {order_id}")
+        last_alert_messages[symbol] = "buy"
+        context.bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Buy order placed: Order ID {order_id}")
+
+        # Place auto sell order at 1.01x price
+        sell_price = price * 1.01
+        sell_result = place_limit_order(symbol, "SELL", quantity, sell_price, base_precision)
+        if sell_result:
+            sell_order_id = sell_result['orderId']
+            pending_orders[symbol] = sell_order_id
+            print(f"{symbol}: Auto sell order placed at ${sell_price:.2f}: Order ID {sell_order_id}")
+            context.bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Auto sell order placed at ${sell_price:.2f}: Order ID {sell_order_id}")
+        else:
+            context.bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Failed to place auto sell order")
+    else:
+        context.bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Buy order failed")
+
 # Trading bot logic for all USDT pairs
-async def trading_bot():
-    target_usdt = 15.0  # Target $15 worth per trade
+async def trading_bot(updater):
+    target_usdt = 15.0
     holdings = {}  # Track holdings for each symbol
 
     # Get all USDT pairs
@@ -277,7 +370,7 @@ async def trading_bot():
                     continue
 
                 min_amount = float(symbol_info['minAmount'])
-                min_trade_size = float(symbol_info['minTradeSize No symbol info returned'])
+                min_trade_size = float(symbol_info['minTradeSize'])
                 base_precision = int(symbol_info['basePrecision'])
 
                 # Fetch historical data
@@ -290,52 +383,41 @@ async def trading_bot():
                 if price is None:
                     continue
 
-                # Calculate quantity for $15 worth
                 quantity = target_usdt / price
                 if quantity < min_trade_size:
                     quantity = min_trade_size
 
                 order_amount = price * quantity
                 if order_amount < min_amount:
-                    print(f"{symbol}: Order amount ${order_amount:.2f} below minimum ${min_amount}. Skipping trade.")
+                    print(f"{symbol}: Order amount ${order_amount:.2f} below minimum ${min_amount}. Skipping.")
                     continue
 
                 # MACD strategy
                 calculate_macd(historical_data)
                 cross_over, cross_under = check_macd_signal_crossover(historical_data, symbol)
-                holding = holdings.get(symbol, False)
+                holding = last_alert_messages.get(symbol) == "buy"
 
-                # Send Telegram message and image on crossover, regardless of order
                 if cross_over and not holding:
-                    message = f"#Long #{symbol} - MACD Cross Over"
+                    message = f"#Long #{symbol} - MACD Cross Over\nPrice: ${price:.2f}"
                     image_buffer = plot_candles(historical_data, symbol, "MACD Cross Over")
                     await send_telegram_message(symbol, message, image_buffer)
 
-                    usdt_balance = get_balance("USDT")
-                    if usdt_balance < order_amount:
-                        print(f"{symbol}: Insufficient USDT (${usdt_balance:.2f} < ${order_amount:.2f}). Skipping trade.")
-                        continue
-
-                    print(f"{symbol}: MACD Cross Over! Buying {quantity:.8f} at ${price}")
-                    result = place_order(symbol, "BUY", quantity, price, base_precision)
-                    if result:
-                        print(f"{symbol}: Buy order placed: Order ID {result['orderId']}")
-                        holdings[symbol] = True
-                    else:
-                        print(f"{symbol}: Buy order failed, but signal sent")
-
                 elif cross_under and holding:
-                    message = f"#Short #{symbol} - MACD Cross Under"
-                    image_buffer = plot_candles(historical_data, symbol, "MACD Cross Under")
-                    await send_telegram_message(symbol, message, image_buffer)
+                    # Cancel existing limit sell order
+                    if symbol in pending_orders:
+                        order_id = pending_orders[symbol]
+                        if cancel_order(symbol, order_id):
+                            del pending_orders[symbol]
 
-                    print(f"{symbol}: MACD Cross Under! Selling {quantity:.8f} at ${price}")
-                    result = place_order(symbol, "SELL", quantity, price, base_precision)
-                    if result:
-                        print(f"{symbol}: Sell order placed: Order ID {result['orderId']}")
-                        holdings[symbol] = False
+                    # Place market sell order
+                    print(f"{symbol}: MACD Cross Under! Selling {quantity:.8f} at market price")
+                    sell_result = place_market_sell_order(symbol, quantity, base_precision)
+                    if sell_result:
+                        print(f"{symbol}: Market sell order placed: Order ID {sell_result['orderId']}")
+                        last_alert_messages[symbol] = "sold"
+                        await telegram_bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Market sell order placed: Order ID {sell_result['orderId']}")
                     else:
-                        print(f"{symbol}: Sell order failed, but signal sent")
+                        await telegram_bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Market sell order failed")
 
                 else:
                     print(f"{symbol}: Current price: ${price} - No action (Holding: {holding})")
@@ -345,6 +427,18 @@ async def trading_bot():
             print(f"Error in bot loop: {e}")
             await asyncio.sleep(10)
 
-# Run the bot
+# Main function to run bot and Telegram handler
+def main():
+    updater = Updater(TELEGRAM_TOKEN, use_context=True)
+    dp = updater.dispatcher
+    dp.add_handler(CallbackQueryHandler(handle_buy_callback, pattern='^buy_'))
+
+    # Start the trading bot
+    asyncio.ensure_future(trading_bot(updater))
+
+    # Start polling Telegram
+    updater.start_polling()
+    updater.idle()
+
 if __name__ == "__main__":
-    asyncio.run(trading_bot())
+    main()
