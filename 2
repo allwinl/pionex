@@ -224,19 +224,18 @@ def plot_candles(df, symbol, title):
     plt.close(fig)
     return buf
 
-# Function to send Telegram message with inline buttons (adapted from reference)
+# Function to send Telegram message with inline button (single "Buy")
 async def send_telegram_message(symbol, message, image_buffer, close_price):
     unique_key = f"{symbol}_{message}_{close_price}"
     if last_alert_messages.get(symbol, "") != unique_key:
         keyboard = [
-            [InlineKeyboardButton("Enter Long", callback_data=f"enter_long_{symbol}_{close_price}")],
-            [InlineKeyboardButton("Enter Short", callback_data=f"enter_short_{symbol}_{close_price}")]
+            [InlineKeyboardButton("Buy", callback_data=f"buy_{symbol}_{close_price}")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await telegram_bot.send_message(chat_id=CHAT_ID, text=message, reply_markup=reply_markup)
         await telegram_bot.send_photo(chat_id=CHAT_ID, photo=image_buffer)
-        print(f"Sent Telegram message and image for {symbol} with Long/Short options")
+        print(f"Sent Telegram message and image for {symbol} with Buy option")
 
         last_alert_messages[symbol] = unique_key
 
@@ -288,7 +287,7 @@ def cancel_order(symbol, order_id):
         print(f"Failed to cancel order {order_id} for {symbol}: {response}")
         return False
 
-# Handle Telegram callback (adapted from reference)
+# Handle Telegram callback (single "Buy" action)
 def handle_telegram_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     query.answer()
@@ -325,7 +324,7 @@ def handle_telegram_callback(update: Update, context: CallbackContext):
         context.bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Insufficient USDT (${usdt_balance:.2f} < ${order_amount:.2f})")
         return
 
-    if action == "enter_long":
+    if action == "buy":
         # Place buy order
         buy_result = place_limit_order(symbol, "BUY", quantity, price, base_precision)
         if buy_result:
@@ -346,11 +345,6 @@ def handle_telegram_callback(update: Update, context: CallbackContext):
                 context.bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Failed to place auto sell order")
         else:
             context.bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Buy order failed")
-
-    elif action == "enter_short":
-        # Placeholder for short logic (Pionex doesn't natively support shorting, so this could be a market sell or skipped)
-        context.bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Shorting not implemented in this Pionex bot.")
-        print(f"{symbol}: Shorting requested but not implemented.")
 
 # Trading bot logic for all USDT pairs
 async def trading_bot(updater):
@@ -444,7 +438,7 @@ async def trading_bot(updater):
 def main():
     updater = Updater(TELEGRAM_TOKEN, use_context=True)
     dp = updater.dispatcher
-    dp.add_handler(CallbackQueryHandler(handle_telegram_callback, pattern='^enter_(long|short)_'))
+    dp.add_handler(CallbackQueryHandler(handle_telegram_callback, pattern='^buy_'))
 
     # Start the trading bot
     asyncio.ensure_future(trading_bot(updater))
