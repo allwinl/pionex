@@ -8,3 +8,10 @@ TELEGRAM_TOKEN = "7291265041:AAHAsg1hnD1fe4eINhfd-86425ReI04lYJY"
 
 BINANCE_API_KEY = 'SvvG1ooYWYpLEZnSMoMbO2qN246CfnCFvB87sVOISg6KPkukq07BpmkqWfWC62yT'
 BINANCE_API_SECRET = 'RhAuSUL6iipT1o1yA9yDTdZoRTdqcLM2KSPYxtvrLMBmGlY8KeljnaNoPfFfhltf'
+
+TELEGRAM_TOKEN = "7291265041:AAHAsg1hnD1fe4eINhfd-86425ReI04lYJY"
+CHAT_ID = "your_chat_id"
+BINANCE_API_KEY = "your_binance_api_key"
+BINANCE_API_SECRET = "your_binance_api_secret"
+PIONEX_API_KEY = "your_pionex_api_key"
+PIONEX_SECRET_KEY = "your_pionex_secret_key"
