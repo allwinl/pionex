@@ -18,6 +18,7 @@ import logging
 import warnings
 import sys
 import threading
+import ccxt.async_support as ccxt_async  # Use async CCXT for Binance
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -32,13 +33,18 @@ logger.info("Script loaded")
 nest_asyncio.apply()
 logger.info("Nest asyncio applied")
 
+# Pionex API config
 BASE_URL = "https://api.pionex.com"
 try:
     API_KEY = config.API_KEY
     SECRET_KEY = config.SECRET_KEY
     TELEGRAM_TOKEN = config.TELEGRAM_TOKEN_RSI
     CHAT_ID = config.CHAT_ID
-    logger.info(f"Config: API_KEY={API_KEY[:4]}..., TELEGRAM_TOKEN={TELEGRAM_TOKEN[:4]}..., CHAT_ID={CHAT_ID}")
+    # Binance API keys (add these to config.py)
+    BINANCE_API_KEY = config.BINANCE_API_KEY
+    BINANCE_SECRET_KEY = config.BINANCE_SECRET_KEY
+    logger.info(f"Config: Pionex API_KEY={API_KEY[:4]}..., TELEGRAM_TOKEN={TELEGRAM_TOKEN[:4]}..., CHAT_ID={CHAT_ID}")
+    logger.info(f"Binance API_KEY={BINANCE_API_KEY[:4]}...")
 except AttributeError as e:
     logger.error(f"Config loading failed: {e}")
     sys.exit(1)
@@ -51,9 +57,17 @@ except Exception as e:
     logger.error(f"Telegram bot init failed: {e}")
     sys.exit(1)
 
+# Initialize Binance exchange via CCXT
+binance = ccxt_async.binance({
+    'apiKey': BINANCE_API_KEY,
+    'secret': BINANCE_SECRET_KEY,
+    'enableRateLimit': True,
+})
+
 last_alert_messages = {}
 pending_orders = {}
 
+# Pionex API Functions
 def generate_signature(method, path, params, body=None):
     timestamp = str(int(time.time() * 1000))
     query_params = params.copy()
@@ -83,7 +97,7 @@ def api_request(method, endpoint, params=None, body=None):
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
-        logger.error(f"API request failed: {e}")
+        logger.error(f"Pionex API request failed: {e}")
         return None
 
 def get_usdt_pairs():
@@ -92,7 +106,7 @@ def get_usdt_pairs():
     if data and 'data' in data and 'symbols' in data['data']:
         usdt_pairs = [s['symbol'] for s in data['data']['symbols'] if s['symbol'].endswith('_USDT') and s['enable']]
         return usdt_pairs
-    logger.error("Failed to fetch USDT pairs")
+    logger.error("Failed to fetch USDT pairs from Pionex")
     return []
 
 def get_symbol_info(symbol):
@@ -114,38 +128,57 @@ def get_balance(currency="USDT"):
     logger.error(f"Failed to fetch balance for {currency}")
     return 0.0
 
-def get_price(symbol):
-    endpoint = "/api/v1/market/depth"
-    params = {"symbol": symbol}
-    data = api_request("GET", endpoint, params)
-    if data and 'data' in data and 'bids' in data['data'] and data['data']['bids']:
-        bid = float(data['data']['bids'][0][0])
-        ask = float(data['data']['asks'][0][0])
-        return (bid + ask) / 2
-    logger.error(f"Failed to fetch price data for {symbol}")
+def place_limit_order(symbol, side, quantity, price, precision):
+    endpoint = "/api/v1/trade/order"
+    params = {}
+    body = {"symbol": symbol, "side": side.upper(), "type": "LIMIT", "size": f"{quantity:.{precision}f}", "price": str(price), "IOC": False}
+    response = api_request("POST", endpoint, params, body)
+    if response and 'data' in response and response['result']:
+        return response['data']
+    logger.error(f"Order placement failed: {response}")
     return None
 
-def get_historical_data(symbol, interval_minutes=1, limit=50):
-    data = []
-    base_price = get_price(symbol)
-    if not base_price:
-        return pd.DataFrame()
-    for i in range(limit):
-        price = base_price * (1 + 0.005 * (i % 2 - 0.5))
-        timestamp = int(time.time() * 1000) - (i * interval_minutes * 60 * 1000)
-        open_price = price * (1 - 0.002)
-        high_price = price * (1 + 0.003)
-        low_price = price * (1 - 0.004)
-        close_price = price
-        volume = 100
-        data.append([timestamp, open_price, high_price, low_price, close_price, volume])
-        time.sleep(0.1)
-    df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-    df.set_index('timestamp', inplace=True)
-    df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
-    return df
+def place_market_sell_order(symbol, quantity, precision):
+    endpoint = "/api/v1/trade/order"
+    params = {}
+    body = {"symbol": symbol, "side": "SELL", "type": "MARKET", "size": f"{quantity:.{precision}f}"}
+    response = api_request("POST", endpoint, params, body)
+    if response and 'data' in response and response['result']:
+        return response['data']
+    logger.error(f"Market sell order failed: {response}")
+    return None
 
+def cancel_order(symbol, order_id):
+    endpoint = "/api/v1/trade/order"
+    params = {"symbol": symbol, "orderId": order_id}
+    response = api_request("DELETE", endpoint, params)
+    if response and 'result' in response and response['result']:
+        logger.info(f"Canceled order {order_id} for {symbol}")
+        return True
+    logger.error(f"Failed to cancel order {order_id} for {symbol}: {response}")
+    return False
+
+# Binance Data via CCXT
+async def get_binance_historical_data(symbol, timeframe="1m", limit=50):
+    try:
+        ohlcv = await binance.fetch_ohlcv(symbol.replace('_', '/'), timeframe, limit=limit)
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        return df
+    except Exception as e:
+        logger.error(f"Failed to fetch Binance data for {symbol}: {e}")
+        return pd.DataFrame()
+
+async def get_binance_price(symbol):
+    try:
+        ticker = await binance.fetch_ticker(symbol.replace('_', '/'))
+        return ticker['last']
+    except Exception as e:
+        logger.error(f"Failed to fetch Binance price for {symbol}: {e}")
+        return None
+
+# Trading Logic
 def calculate_macd(df):
     macd = ta.trend.MACD(df['Close'])
     df['macd'] = macd.macd()
@@ -198,50 +231,20 @@ def plot_candles(df, symbol, title):
 def send_telegram_message(symbol, message, image_buffer, close_price):
     unique_key = f"{symbol}_{message}_{close_price}"
     if last_alert_messages.get(symbol, "") != unique_key:
-        keyboard = [[InlineKeyboardButton("Buy", callback_data=f"buy_{symbol}_{close_price}")]]
+        keyboard = [[InlineKeyboardButton("Buy", callback_data=f"buy|{symbol}|{close_price}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         telegram_bot.send_message(chat_id=CHAT_ID, text=message, reply_markup=reply_markup)
         telegram_bot.send_photo(chat_id=CHAT_ID, photo=image_buffer)
         logger.info(f"Sent Telegram message and image for {symbol}")
         last_alert_messages[symbol] = unique_key
 
-def place_limit_order(symbol, side, quantity, price, precision):
-    endpoint = "/api/v1/trade/order"
-    params = {}
-    body = {"symbol": symbol, "side": side.upper(), "type": "LIMIT", "size": f"{quantity:.{precision}f}", "price": str(price), "IOC": False}
-    response = api_request("POST", endpoint, params, body)
-    if response and 'data' in response and response['result']:
-        return response['data']
-    logger.error(f"Order placement failed: {response}")
-    return None
-
-def place_market_sell_order(symbol, quantity, precision):
-    endpoint = "/api/v1/trade/order"
-    params = {}
-    body = {"symbol": symbol, "side": "SELL", "type": "MARKET", "size": f"{quantity:.{precision}f}"}
-    response = api_request("POST", endpoint, params, body)
-    if response and 'data' in response and response['result']:
-        return response['data']
-    logger.error(f"Market sell order failed: {response}")
-    return None
-
-def cancel_order(symbol, order_id):
-    endpoint = "/api/v1/trade/order"
-    params = {"symbol": symbol, "orderId": order_id}
-    response = api_request("DELETE", endpoint, params)
-    if response and 'result' in response and response['result']:
-        logger.info(f"Canceled order {order_id} for {symbol}")
-        return True
-    logger.error(f"Failed to cancel order {order_id} for {symbol}: {response}")
-    return False
-
 def handle_telegram_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     query.answer()
-    data = query.data.split('_')
-    if len(data) < 3:
+    data = query.data.split('|')
+    if len(data) != 3:
         context.bot.send_message(chat_id=CHAT_ID, text="Invalid command format.")
-        logger.error("Invalid callback data format")
+        logger.error(f"Invalid callback data: {query.data}")
         return
     action, symbol, close_price = data[0], data[1], float(data[2])
     target_usdt = 15.0
@@ -287,7 +290,7 @@ def handle_telegram_callback(update: Update, context: CallbackContext):
 
 async def trading_bot():
     target_usdt = 15.0
-    logger.info("Fetching USDT pairs...")
+    logger.info("Fetching USDT pairs from Pionex...")
     usdt_pairs = get_usdt_pairs()
     if not usdt_pairs:
         logger.error("No USDT pairs found. Stopping bot.")
@@ -295,7 +298,7 @@ async def trading_bot():
     logger.info(f"Monitoring {len(usdt_pairs)} USDT pairs: {usdt_pairs[:5]}...")
     symbol_info_dict = {}
     valid_usdt_pairs = []
-    for symbol in usdt_pairs[:5]:
+    for symbol in usdt_pairs[:5]:  # Limit to 5 for testing
         info = get_symbol_info(symbol)
         if info:
             symbol_info_dict[symbol] = info
@@ -303,7 +306,7 @@ async def trading_bot():
         else:
             logger.warning(f"Skipping {symbol} due to invalid symbol info")
     logger.info(f"Valid USDT pairs to monitor: {len(valid_usdt_pairs)}")
-    logger.info("Starting Pionex trading bot loop...")
+    logger.info("Starting trading bot loop with Binance data...")
     while True:
         try:
             for symbol in valid_usdt_pairs:
@@ -313,11 +316,11 @@ async def trading_bot():
                 min_amount = float(symbol_info['minAmount'])
                 min_trade_size = float(symbol_info['minTradeSize'])
                 base_precision = int(symbol_info['basePrecision'])
-                historical_data = get_historical_data(symbol)
+                historical_data = awaitŝ get_binance_historical_data(symbol)
                 if historical_data.empty:
-                    logger.warning(f"{symbol}: No historical data available")
+                    logger.warning(f"{symbol}: No historical data from Binance")
                     continue
-                price = get_price(symbol)
+                price = await get_binance_price(symbol)
                 if price is None:
                     continue
                 quantity = target_usdt / price
@@ -353,6 +356,8 @@ async def trading_bot():
         except Exception as e:
             logger.error(f"Error in bot loop: {e}")
             await asyncio.sleep(10)
+        finally:
+            await binance.close()  # Ensure Binance connection closes cleanly
 
 def run_trading_bot():
     logger.info("Starting trading bot in thread...")
@@ -363,8 +368,7 @@ def main():
     try:
         updater = Updater(TELEGRAM_TOKEN, use_context=True)
         dp = updater.dispatcher
-        dp.add_handler(CallbackQueryHandler(handle_telegram_callback, pattern='^buy_'))
-        # Start trading bot in a separate thread
+        dp.add_handler(CallbackQueryHandler(handle_telegram_callback, pattern='^buy\|'))
         trading_thread = threading.Thread(target=run_trading_bot, daemon=True)
         trading_thread.start()
         logger.info("Starting Telegram polling...")
