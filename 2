@@ -18,10 +18,8 @@ import logging
 import warnings
 import sys
 
-# Suppress warnings at the earliest point
 warnings.filterwarnings("ignore", category=UserWarning)
 
-# Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -30,12 +28,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 logger.info("Script loaded")
-
-# Apply nest_asyncio
-logger.info("Applying nest_asyncio...")
 nest_asyncio.apply()
+logger.info("Nest asyncio applied")
 
-# API setup
 BASE_URL = "https://api.pionex.com"
 try:
     API_KEY = config.API_KEY
@@ -47,7 +42,6 @@ except AttributeError as e:
     logger.error(f"Config loading failed: {e}")
     sys.exit(1)
 
-# Telegram setup
 logger.info("Initializing Telegram bot...")
 try:
     telegram_bot = Bot(token=TELEGRAM_TOKEN)
@@ -56,7 +50,6 @@ except Exception as e:
     logger.error(f"Telegram bot init failed: {e}")
     sys.exit(1)
 
-# Global storage
 last_alert_messages = {}
 pending_orders = {}
 
@@ -201,13 +194,13 @@ def plot_candles(df, symbol, title):
     plt.close(fig)
     return buf
 
-async def send_telegram_message(symbol, message, image_buffer, close_price):
+def send_telegram_message(symbol, message, image_buffer, close_price):
     unique_key = f"{symbol}_{message}_{close_price}"
     if last_alert_messages.get(symbol, "") != unique_key:
         keyboard = [[InlineKeyboardButton("Buy", callback_data=f"buy_{symbol}_{close_price}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await telegram_bot.send_message(chat_id=CHAT_ID, text=message, reply_markup=reply_markup)
-        await telegram_bot.send_photo(chat_id=CHAT_ID, photo=image_buffer)
+        telegram_bot.send_message(chat_id=CHAT_ID, text=message, reply_markup=reply_markup)
+        telegram_bot.send_photo(chat_id=CHAT_ID, photo=image_buffer)
         logger.info(f"Sent Telegram message and image for {symbol}")
         last_alert_messages[symbol] = unique_key
 
@@ -339,7 +332,7 @@ async def trading_bot(updater):
                 if cross_over and not holding:
                     message = f"#Long #{symbol} - MACD Cross Over\nPrice: ${price:.2f}"
                     image_buffer = plot_candles(historical_data, symbol, "MACD Cross Over")
-                    await send_telegram_message(symbol, message, image_buffer, price)
+                    send_telegram_message(symbol, message, image_buffer, price)
                 elif cross_under and holding:
                     if symbol in pending_orders:
                         order_id = pending_orders[symbol]
@@ -350,9 +343,9 @@ async def trading_bot(updater):
                     if sell_result:
                         logger.info(f"{symbol}: Market sell order placed: Order ID {sell_result['orderId']}")
                         last_alert_messages[symbol] = "sold"
-                        await telegram_bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Market sell order placed: Order ID {sell_result['orderId']}")
+                        telegram_bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Market sell order placed: Order ID {sell_result['orderId']}")
                     else:
-                        await telegram_bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Market sell order failed")
+                        telegram_bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Market sell order failed")
                 else:
                     logger.info(f"{symbol}: Current price: ${price} - No action (Holding: {holding})")
             await asyncio.sleep(10)
