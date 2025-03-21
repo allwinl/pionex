@@ -284,7 +284,7 @@ def handle_telegram_callback(update: Update, context: CallbackContext):
         else:
             context.bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Buy order failed")
 
-async def trading_bot(updater):
+async def trading_bot(context: CallbackContext):
     target_usdt = 15.0
     logger.info("Fetching USDT pairs...")
     usdt_pairs = get_usdt_pairs()
@@ -353,14 +353,17 @@ async def trading_bot(updater):
             logger.error(f"Error in bot loop: {e}")
             await asyncio.sleep(10)
 
+def start_trading_bot(updater):
+    logger.info("Scheduling trading bot...")
+    updater.dispatcher.run_async(trading_bot, updater.dispatcher)
+
 def main():
     logger.info("Starting main function...")
     try:
         updater = Updater(TELEGRAM_TOKEN, use_context=True)
         dp = updater.dispatcher
         dp.add_handler(CallbackQueryHandler(handle_telegram_callback, pattern='^buy_'))
-        logger.info("Starting trading bot...")
-        asyncio.ensure_future(trading_bot(updater))
+        start_trading_bot(updater)
         logger.info("Starting Telegram polling...")
         updater.start_polling()
         updater.idle()
