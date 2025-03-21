@@ -17,6 +17,7 @@ import config
 import logging
 import warnings
 import sys
+import threading
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -124,26 +125,25 @@ def get_price(symbol):
     logger.error(f"Failed to fetch price data for {symbol}")
     return None
 
-def get_historical_data(symbol, interval_minutes=1, limit=50):
-    data = []
-    base_price = get_price(symbol)
-    if not base_price:
-        return pd.DataFrame()
-    for i in range(limit):
-        price = base_price * (1 + 0.005 * (i % 2 - 0.5))
-        timestamp = int(time.time() * 1000) - (i * interval_minutes * 60 * 1000)
-        open_price = price * (1 - 0.002)
-        high_price = price * (1 + 0.003)
-        low_price = price * (1 - 0.004)
-        close_price = price
-        volume = 100
-        data.append([timestamp, open_price, high_price, low_price, close_price, volume])
-        time.sleep(0.1)
-    df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-    df.set_index('timestamp', inplace=True)
-    df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
-    return df
+def get_historical_data(symbol, interval="1m", limit=50):
+    endpoint = "/api/v1/market/klines"
+    params = {
+        "symbol": symbol,
+        "interval": interval,
+        "limit": limit
+    }
+    data = api_request("GET", endpoint, params)
+    if data and 'data' in data and 'klines' in data['data']:
+        klines = data['data']['klines']
+        df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'closeTime', 'quoteVolume', 'trades', 'takerBuyBase', 'takerBuyQuote', 'ignore'])
+        df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        df = df.astype(float)
+        df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+        return df
+    logger.error(f"Failed to fetch historical data for {symbol}: {data}")
+    return pd.DataFrame()
 
 def calculate_macd(df):
     macd = ta.trend.MACD(df['Close'])
@@ -197,7 +197,7 @@ def plot_candles(df, symbol, title):
 def send_telegram_message(symbol, message, image_buffer, close_price):
     unique_key = f"{symbol}_{message}_{close_price}"
     if last_alert_messages.get(symbol, "") != unique_key:
-        keyboard = [[InlineKeyboardButton("Buy", callback_data=f"buy_{symbol}_{close_price}")]]
+        keyboard = [[InlineKeyboardButton("Buy", callback_data=f"buy|{symbol}|{close_price}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         telegram_bot.send_message(chat_id=CHAT_ID, text=message, reply_markup=reply_markup)
         telegram_bot.send_photo(chat_id=CHAT_ID, photo=image_buffer)
@@ -237,10 +237,10 @@ def cancel_order(symbol, order_id):
 def handle_telegram_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     query.answer()
-    data = query.data.split('_')
-    if len(data) < 3:
+    data = query.data.split('|')
+    if len(data) != 3:
         context.bot.send_message(chat_id=CHAT_ID, text="Invalid command format.")
-        logger.error("Invalid callback data format")
+        logger.error(f"Invalid callback data: {query.data}")
         return
     action, symbol, close_price = data[0], data[1], float(data[2])
     target_usdt = 15.0
@@ -284,7 +284,7 @@ def handle_telegram_callback(update: Update, context: CallbackContext):
         else:
             context.bot.send_message(chat_id=CHAT_ID, text=f"{symbol}: Buy order failed")
 
-async def trading_bot(context: CallbackContext):
+async def trading_bot():
     target_usdt = 15.0
     logger.info("Fetching USDT pairs...")
     usdt_pairs = get_usdt_pairs()
@@ -353,17 +353,18 @@ async def trading_bot(context: CallbackContext):
             logger.error(f"Error in bot loop: {e}")
             await asyncio.sleep(10)
 
-def start_trading_bot(updater):
-    logger.info("Scheduling trading bot...")
-    updater.dispatcher.run_async(trading_bot, updater.dispatcher)
+def run_trading_bot():
+    logger.info("Starting trading bot in thread...")
+    asyncio.run(trading_bot())
 
 def main():
     logger.info("Starting main function...")
     try:
         updater = Updater(TELEGRAM_TOKEN, use_context=True)
         dp = updater.dispatcher
-        dp.add_handler(CallbackQueryHandler(handle_telegram_callback, pattern='^buy_'))
-        start_trading_bot(updater)
+        dp.add_handler(CallbackQueryHandler(handle_telegram_callback, pattern='^buy\|'))
+        trading_thread = threading.Thread(target=run_trading_bot, daemon=True)
+        trading_thread.start()
         logger.info("Starting Telegram polling...")
         updater.start_polling()
         updater.idle()
