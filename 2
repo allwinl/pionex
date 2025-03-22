@@ -20,7 +20,7 @@ import json
 import telegram.error
 
 # Set up logging
-logging.basicConfig(level=logging.DEBUG)  # Detailed output for debugging
+logging.basicConfig(level=logging.DEBUG)  # Detailed logging for debugging
 logger = logging.getLogger(__name__)
 
 # Time intervals
@@ -53,7 +53,7 @@ binance = ccxt.binance({
 })
 
 # Store active orders and last alerts
-active_orders = {}  # {symbol: {'order_id': str, 'sell_price': float, 'side': 'BUY'}}
+active_orders = {}  # {symbol: {'order_id': str, 'sell_price': float, 'side': str}}
 last_alert_messages = {}
 ALERT_COOLDOWN = 240  # minutes
 
@@ -100,6 +100,8 @@ def api_request(method, endpoint, params=None, body=None):
         return response.json()
     except requests.exceptions.RequestException as e:
         logger.error(f"Pionex API request failed: {e}")
+        if hasattr(e.response, 'text'):
+            logger.error(f"Response text: {e.response.text}")
         return None
 
 def get_symbol_info(symbol):
@@ -180,7 +182,7 @@ def get_current_price(symbol):
 # Binance Data Functions
 def get_historical_data(symbol, interval, limit=100):
     ohlcv = binance.fetch_ohlcv(symbol, interval, limit=limit)
-    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df = pd.DataFrame( personallyohlvcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     df.set_index('timestamp', inplace=True)
     df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
@@ -276,7 +278,7 @@ async def send_telegram_message(bot: Bot, chat_id: str, symbol: str, message: st
         return
 
     await bot.send_photo(chat_id=chat_id, photo=image_buffer)
-    keyboard = [[InlineKeyboardButton("Buy", callback_data=f"buy_{symbol}_{close_price}")]]
+    keyboard = [[InlineKeyboardButton("BUY", callback_data=f"buy_{symbol}_{close_price}")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await bot.send_message(chat_id=chat_id, text=message, reply_markup=reply_markup)
     
@@ -291,7 +293,7 @@ async def handle_telegram_callback(update: Update, context: ContextTypes.DEFAULT
         logger.warning(f"Failed to answer callback query: {e}")
     
     try:
-        callback_data = query.data.replace('-', '_')  # Normalize separators
+        callback_data = query.data.replace('-', '_')  # Normalize to underscores
         logger.info(f"Received callback data: {callback_data}")
         parts = callback_data.split('_')
         if len(parts) != 3:  # Expect buy_<symbol>_<price>
@@ -307,7 +309,7 @@ async def handle_telegram_callback(update: Update, context: ContextTypes.DEFAULT
         # Place market buy order
         buy_order_id = place_market_order(symbol, "BUY")
         if not buy_order_id:
-            await query.edit_message_text(f"Failed to place buy order for {symbol}")
+            await query.edit_message_text(f"Failed to place BUY order for {symbol}")
             return
         
         # Get current price and calculate sell price
@@ -328,22 +330,19 @@ async def handle_telegram_callback(update: Update, context: ContextTypes.DEFAULT
         # Place limit sell order
         sell_order_id = place_limit_order(symbol, "SELL", quantity, sell_price)
         if not sell_order_id:
-            await query.edit_message_text(f"Failed to place sell order for {symbol}")
+            await query.edit_message_text(f"Failed to place SELL order for {symbol}")
             return
         
         # Store order info
         active_orders[symbol] = {
             'order_id': sell_order_id,
             'sell_price': sell_price,
-            'side': 'BUY'
+            'side': 'BUY'  # Spot trading: bought asset
         }
-        await query.edit_message_text(f"Spot buy order placed for {symbol} at {current_price:.2f}\nLimit sell order set at {sell_price:.2f}")
+        await query.edit_message_text(f"Position opened with BUY for {symbol} at {current_price:.2f}\nSELL order placed at {sell_price:.2f}")
     except Exception as e:
         logger.error(f"Error in callback handler: {e}")
-        try:
-            await query.edit_message_text(f"Error processing request: {str(e)}")
-        except telegram.error.BadRequest as e:
-            logger.warning(f"Failed to edit message: {e}")
+        await query.edit_message_text(f"Error processing request: {str(e)}")
 
 async def check_alerts(bot: Bot):
     for symbol in SELECTED_SYMBOLS:
@@ -366,11 +365,11 @@ async def check_alerts(bot: Bot):
                         if sell_order_id:
                             del active_orders[symbol]
                             await bot.send_message(chat_id=config.CHAT_ID, 
-                                                 text=f"Spot position sold for {symbol} due to histogram cross under")
+                                                 text=f"Position closed with SELL for {symbol} due to histogram cross under")
                         else:
-                            logger.error(f"Failed to place market sell for {symbol}")
+                            logger.error(f"Failed to place market SELL for {symbol}")
                     else:
-                        logger.error(f"Failed to cancel sell order for {symbol}")
+                        logger.error(f"Failed to cancel SELL order for {symbol}")
         except Exception as e:
             logger.error(f"Error checking {symbol}: {e}")
 
