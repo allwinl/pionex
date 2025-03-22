@@ -17,9 +17,10 @@ import hmac
 import hashlib
 from urllib.parse import urlencode
 import json
+import telegram.error
 
 # Set up logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)  # Set to DEBUG for detailed output
 logger = logging.getLogger(__name__)
 
 # Time intervals
@@ -52,7 +53,7 @@ binance = ccxt.binance({
 })
 
 # Store active orders and last alerts
-active_orders = {}  # {symbol: {'order_id': str, 'sell_price': float, 'side': str}}
+active_orders = {}  # {symbol: {'order_id': str, 'sell_price': float, 'side': 'BUY'}}
 last_alert_messages = {}
 ALERT_COOLDOWN = 240  # minutes
 
@@ -63,9 +64,11 @@ def generate_signature(method, path, params, body=None):
     query_params['timestamp'] = timestamp
     sorted_params = urlencode(sorted(query_params.items()))
     path_url = f"{path}?{sorted_params}"
-    string_to_sign = f"{method}{path_url}"
+    string_to_sign = f"{method.upper()}{path_url}"
     if body:
-        string_to_sign += json.dumps(body, separators=(',', ':'))
+        body_str = json.dumps(body, separators=(',', ':'))
+        string_to_sign += body_str
+    logger.debug(f"String to sign: {string_to_sign}")
     signature = hmac.new(
         PIONEX_SECRET_KEY.encode('utf-8'),
         string_to_sign.encode('utf-8'),
@@ -84,11 +87,15 @@ def api_request(method, endpoint, params=None, body=None):
         "PIONEX-SIGNATURE": signature,
         "Content-Type": "application/json"
     }
+    logger.debug(f"Request URL: {url}")
+    logger.debug(f"Headers: {headers}")
+    if body:
+        logger.debug(f"Body: {json.dumps(body)}")
     try:
         if method == "GET":
             response = requests.get(url, headers=headers, params=params)
         elif method == "POST":
-            response = requests.post(url, headers=headers, params=params, data=json.dumps(body))
+            response = requests.post(url, headers=headers, params=params, data=json.dumps(body, separators=(',', ':')))
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
@@ -97,7 +104,6 @@ def api_request(method, endpoint, params=None, body=None):
 
 def get_symbol_info(symbol):
     endpoint = "/api/v1/common/symbols"
-    # Convert Binance format (XTZUSDT) to Pionex format (XTZ_USDT)
     pionex_symbol = symbol.replace("USDT", "_USDT")
     params = {"symbols": pionex_symbol}
     data = api_request("GET", endpoint, params)
@@ -119,7 +125,7 @@ def place_market_order(symbol, side, amount_usdt=15.0):
         "symbol": pionex_symbol,
         "side": side.upper(),
         "type": "MARKET",
-        "amount": str(amount_usdt),  # Amount in USDT for market order
+        "amount": str(amount_usdt),
     }
     response = api_request("POST", endpoint, params, body)
     logger.info(f"Market order response for {pionex_symbol}: {response}")
@@ -270,7 +276,7 @@ async def send_telegram_message(bot: Bot, chat_id: str, symbol: str, message: st
         return
 
     await bot.send_photo(chat_id=chat_id, photo=image_buffer)
-    keyboard = [[InlineKeyboardButton("Buy", callback_data=f"enter_long_{symbol}_{close_price}")]]
+    keyboard = [[InlineKeyboardButton("Buy", callback_data=f"buy_{symbol}_{close_price}")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await bot.send_message(chat_id=chat_id, text=message, reply_markup=reply_markup)
     
@@ -279,18 +285,21 @@ async def send_telegram_message(bot: Bot, chat_id: str, symbol: str, message: st
 
 async def handle_telegram_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     try:
-        callback_data = query.data
+        await query.answer()
+    except telegram.error.BadRequest as e:
+        logger.warning(f"Failed to answer callback query: {e}")
+    
+    try:
+        callback_data = query.data.replace('-', '_')  # Normalize to underscores
         logger.info(f"Received callback data: {callback_data}")
         parts = callback_data.split('_')
-        if len(parts) != 4:  # Expect exactly 4 parts
+        if len(parts) != 3:  # Expect buy_<symbol>_<price>
             raise ValueError(f"Invalid callback data format: {callback_data}")
         
-        # Correctly assign parts
-        action = parts[0] + "_" + parts[1]  # "enter_long"
-        symbol = parts[2]  # e.g., "XTZUSDT"
-        close_price = float(parts[3])  # e.g., 0.691
+        action = parts[0]  # "buy"
+        symbol = parts[1]  # e.g., "LTCUSDT"
+        close_price = float(parts[2])  # e.g., 90.81
         
         # Place market buy order
         buy_order_id = place_market_order(symbol, "BUY")
@@ -323,9 +332,9 @@ async def handle_telegram_callback(update: Update, context: ContextTypes.DEFAULT
         active_orders[symbol] = {
             'order_id': sell_order_id,
             'sell_price': sell_price,
-            'side': 'LONG'
+            'side': 'BUY'  # Changed from 'LONG' to 'BUY' for spot trading
         }
-        await query.edit_message_text(f"Long position opened for {symbol} at {current_price:.2f}\nSell order placed at {sell_price:.2f}")
+        await query.edit_message_text(f"Spot buy order placed for {symbol} at {current_price:.2f}\nLimit sell order set at {sell_price:.2f}")
     except Exception as e:
         logger.error(f"Error in callback handler: {e}")
         await query.edit_message_text(f"Error processing request: {str(e)}")
@@ -343,18 +352,15 @@ async def check_alerts(bot: Bot):
                 image_buffer = plot_candles(historical_data, fib_data, symbol, title)
                 await send_telegram_message(bot, config.CHAT_ID, symbol, message, image_buffer, historical_data['Close'].iloc[-1])
             
-            # Check for short condition to close long positions
             if hist_cross_under and symbol in active_orders:
                 order_info = active_orders[symbol]
-                if order_info['side'] == 'LONG':
-                    # Cancel existing sell order
+                if order_info['side'] == 'BUY':
                     if cancel_order(symbol, order_info['order_id']):
-                        # Place market sell order
                         sell_order_id = place_market_order(symbol, "SELL")
                         if sell_order_id:
                             del active_orders[symbol]
                             await bot.send_message(chat_id=config.CHAT_ID, 
-                                                 text=f"Long position closed for {symbol} due to histogram cross under")
+                                                 text=f"Spot position sold for {symbol} due to histogram cross under")
                         else:
                             logger.error(f"Failed to place market sell for {symbol}")
                     else:
