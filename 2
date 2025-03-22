@@ -20,7 +20,7 @@ import json
 import telegram.error
 
 # Set up logging
-logging.basicConfig(level=logging.DEBUG)  # Set to DEBUG for detailed output
+logging.basicConfig(level=logging.DEBUG)  # Detailed output for debugging
 logger = logging.getLogger(__name__)
 
 # Time intervals
@@ -291,7 +291,7 @@ async def handle_telegram_callback(update: Update, context: ContextTypes.DEFAULT
         logger.warning(f"Failed to answer callback query: {e}")
     
     try:
-        callback_data = query.data.replace('-', '_')  # Normalize to underscores
+        callback_data = query.data.replace('-', '_')  # Normalize separators
         logger.info(f"Received callback data: {callback_data}")
         parts = callback_data.split('_')
         if len(parts) != 3:  # Expect buy_<symbol>_<price>
@@ -300,6 +300,9 @@ async def handle_telegram_callback(update: Update, context: ContextTypes.DEFAULT
         action = parts[0]  # "buy"
         symbol = parts[1]  # e.g., "LTCUSDT"
         close_price = float(parts[2])  # e.g., 90.81
+        
+        if action != "buy":
+            raise ValueError(f"Unknown action: {action}")
         
         # Place market buy order
         buy_order_id = place_market_order(symbol, "BUY")
@@ -332,12 +335,15 @@ async def handle_telegram_callback(update: Update, context: ContextTypes.DEFAULT
         active_orders[symbol] = {
             'order_id': sell_order_id,
             'sell_price': sell_price,
-            'side': 'BUY'  # Changed from 'LONG' to 'BUY' for spot trading
+            'side': 'BUY'
         }
         await query.edit_message_text(f"Spot buy order placed for {symbol} at {current_price:.2f}\nLimit sell order set at {sell_price:.2f}")
     except Exception as e:
         logger.error(f"Error in callback handler: {e}")
-        await query.edit_message_text(f"Error processing request: {str(e)}")
+        try:
+            await query.edit_message_text(f"Error processing request: {str(e)}")
+        except telegram.error.BadRequest as e:
+            logger.warning(f"Failed to edit message: {e}")
 
 async def check_alerts(bot: Bot):
     for symbol in SELECTED_SYMBOLS:
