@@ -19,23 +19,17 @@ from urllib.parse import urlencode
 import json
 import telegram.error
 
-# Custom logging filter to suppress specific INFO message
-class SuppressTestMessageFilter(logging.Filter):
-    def filter(self, record):
-        return not (record.levelname == 'INFO' and "Testing Pionex signature with a sample request" in record.msg)
-
-# Set up logging explicitly
+# Set up logging
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 
 file_handler = logging.FileHandler('trading_bot.log')
-file_handler.setLevel(logging.DEBUG)
+file_handler.setLevel(logging.INFO)
 file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 
 console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.INFO)
 console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-console_handler.addFilter(SuppressTestMessageFilter())
 
 logger.handlers.clear()
 logger.addHandler(file_handler)
@@ -92,13 +86,11 @@ def generate_signature(method, path, params, body=None):
     if body:
         body_str = json.dumps(body, separators=(',', ':'))
         string_to_sign += body_str
-    logger.debug(f"Pionex trade string to sign: {string_to_sign}")
     signature = hmac.new(
         PIONEX_SECRET_KEY.encode('utf-8'),
         string_to_sign.encode('utf-8'),
         hashlib.sha256
     ).hexdigest()
-    logger.debug(f"Pionex trade generated signature: {signature}")
     return signature, timestamp
 
 def api_request(method, endpoint, params=None, body=None):
@@ -112,11 +104,6 @@ def api_request(method, endpoint, params=None, body=None):
         "PIONEX-SIGNATURE": signature,
         "Content-Type": "application/json"
     }
-    if "trade" in endpoint.lower():
-        logger.debug(f"Pionex trade request URL: {url}")
-        logger.debug(f"Pionex trade headers: {headers}")
-        if body:
-            logger.debug(f"Pionex trade body: {json.dumps(body)}")
     try:
         if method == "GET":
             response = requests.get(url, headers=headers, params=params)
@@ -127,10 +114,7 @@ def api_request(method, endpoint, params=None, body=None):
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
-        if "trade" in endpoint.lower():
-            logger.debug(f"Pionex trade error: {e}")
-            if hasattr(e.response, 'text'):
-                logger.debug(f"Pionex trade response text: {e.response.text}")
+        logger.error(f"API request failed for {endpoint}: {e}")
         return None
 
 def get_symbol_info(symbol):
@@ -138,71 +122,71 @@ def get_symbol_info(symbol):
     pionex_symbol = symbol.replace("USDT", "_USDT")
     params = {"symbols": pionex_symbol}
     data = api_request("GET", endpoint, params)
-    logger.info(f"Symbol info response for {pionex_symbol}: {data}")
     if data and 'data' in data and 'symbols' in data['data'] and data['data']['symbols']:
         return data['data']['symbols'][0]
     logger.error(f"Failed to fetch symbol info for {pionex_symbol}")
     return None
 
-def place_market_order(symbol, side, amount_usdt=15.0):
+def place_market_order(symbol, side, amount_usdt=15.0, quantity=None):
     endpoint = "/api/v1/trade/order"
     params = {}
     symbol_info = get_symbol_info(symbol)
     if not symbol_info:
-        logger.error(f"No symbol info for {symbol}")
         return None
     pionex_symbol = symbol.replace("USDT", "_USDT")
-    current_price = get_current_price(symbol)
-    if not current_price:
-        logger.error(f"Failed to get current price for {pionex_symbol}")
+    best_bid, best_ask = get_current_price(symbol)
+    if not best_bid or not best_ask:
         return None
     quote_precision = int(symbol_info['quotePrecision'])
     base_precision = int(symbol_info['basePrecision'])
     min_amount = float(symbol_info['minAmount'])
-    amount_usdt = max(amount_usdt, min_amount)
     body = {
         "symbol": pionex_symbol,
         "side": side.upper(),
         "type": "MARKET",
     }
     if side.upper() == "BUY":
+        amount_usdt = max(amount_usdt, min_amount)
         body["amount"] = f"{amount_usdt:.{quote_precision}f}"
+        bought_quantity = amount_usdt / best_ask  # Approximate quantity for tracking
+        bought_quantity = float(f"{bought_quantity:.{base_precision}f}")
     else:  # SELL
-        quantity = amount_usdt / current_price
+        if quantity is None:
+            logger.error(f"No quantity provided for SELL order on {pionex_symbol}")
+            return None
         body["size"] = f"{quantity:.{base_precision}f}"
+        bought_quantity = None  # Not needed for SELL
+
     response = api_request("POST", endpoint, params, body)
-    logger.info(f"Market order response for {pionex_symbol}: {response}")
     if response and 'data' in response and response['result']:
-        return response['data']['orderId']
-    logger.error(f"Market order failed for {pionex_symbol}: {response}")
-    return None
+        logger.info(f"Market {side} order placed for {pionex_symbol}: {response['data']['orderId']}")
+        return response['data']['orderId'], bought_quantity if side.upper() == "BUY" else None
+    logger.error(f"Market {side} order failed for {pionex_symbol}: {response}")
+    return None, None
 
 def place_limit_order(symbol, side, quantity, price):
     endpoint = "/api/v1/trade/order"
     params = {}
     symbol_info = get_symbol_info(symbol)
     if not symbol_info:
-        logger.error(f"No symbol info for {symbol}")
         return None
     pionex_symbol = symbol.replace("USDT", "_USDT")
     quote_precision = int(symbol_info['quotePrecision'])
     base_precision = int(symbol_info['basePrecision'])
-    # Round price to quotePrecision (e.g., 2 decimals for LTC_USDT)
     price = float(f"{price:.{quote_precision}f}")
     body = {
         "symbol": pionex_symbol,
         "side": side.upper(),
         "type": "LIMIT",
         "size": f"{quantity:.{base_precision}f}",
-        "price": f"{price:.{quote_precision}f}",  # Ensure proper precision
+        "price": f"{price:.{quote_precision}f}",
         "IOC": False
     }
-    logger.debug(f"Placing limit order with price: {price}, size: {quantity}")
     response = api_request("POST", endpoint, params, body)
-    logger.info(f"Limit order response for {pionex_symbol}: {response}")
     if response and 'data' in response and response['result']:
+        logger.info(f"Limit {side} order placed for {pionex_symbol}: {response['data']['orderId']}")
         return response['data']['orderId']
-    logger.error(f"Limit order failed for {pionex_symbol}: {response}")
+    logger.error(f"Limit {side} order failed for {pionex_symbol}: {response}")
     return None
 
 def cancel_order(symbol, order_id):
@@ -214,8 +198,8 @@ def cancel_order(symbol, order_id):
         "orderId": order_id
     }
     response = api_request("DELETE", endpoint, params, body)
-    logger.info(f"Cancel order response for {pionex_symbol} order {order_id}: {response}")
     if response and 'result' in response and response['result']:
+        logger.info(f"Order {order_id} cancelled for {pionex_symbol}")
         return True
     logger.error(f"Cancel order failed for {pionex_symbol} order {order_id}: {response}")
     return False
@@ -225,12 +209,11 @@ def get_current_price(symbol):
     pionex_symbol = symbol.replace("USDT", "_USDT")
     params = {"symbol": pionex_symbol}
     data = api_request("GET", endpoint, params)
-    logger.info(f"Price response for {pionex_symbol}: {data}")
     if data and 'data' in data and 'bids' in data['data'] and 'asks' in data['data']:
         best_bid = float(data['data']['bids'][0][0])
         best_ask = float(data['data']['asks'][0][0])
-        return best_bid, best_ask  # Return both bid and ask for better price setting
-    logger.error(f"Failed to fetch price for {pionex_symbol}: {data}")
+        return best_bid, best_ask
+    logger.error(f"Failed to fetch price for {pionex_symbol}")
     return None, None
 
 # Binance Data Functions
@@ -348,7 +331,6 @@ async def handle_telegram_callback(update: Update, context: ContextTypes.DEFAULT
     
     try:
         callback_data = query.data.replace('-', '_')
-        logger.info(f"Received callback data: {callback_data}")
         parts = callback_data.split('_')
         if len(parts) != 3:
             raise ValueError(f"Invalid callback data format: {callback_data}")
@@ -360,8 +342,8 @@ async def handle_telegram_callback(update: Update, context: ContextTypes.DEFAULT
         if action != "buy":
             raise ValueError(f"Unknown action: {action}")
         
-        # Place market buy order
-        buy_order_id = place_market_order(symbol, "BUY")
+        # Place market buy order and get quantity
+        buy_order_id, bought_quantity = place_market_order(symbol, "BUY")
         if not buy_order_id:
             await query.edit_message_text(f"Failed to place BUY order for {symbol}")
             return
@@ -371,26 +353,27 @@ async def handle_telegram_callback(update: Update, context: ContextTypes.DEFAULT
         if not best_bid or not best_ask:
             await query.edit_message_text(f"Failed to get price for {symbol}")
             return
-        sell_price = best_ask * 1.01  # Slightly above best ask
-        quantity = 15.0 / best_bid
+        sell_price = best_ask * 1.01
         symbol_info = get_symbol_info(symbol)
-        if symbol_info:
-            precision = int(symbol_info['basePrecision'])
-            quantity = float(f"{quantity:.{precision}f}")
-        else:
+        if not symbol_info:
             await query.edit_message_text(f"Failed to get symbol info for {symbol}")
             return
+        precision = int(symbol_info['basePrecision'])
+        quote_precision = int(symbol_info['quotePrecision'])
+        sell_quantity = float(f"{bought_quantity:.{precision}f}")
+        sell_price = float(f"{sell_price:.{quote_precision}f}")
         
         # Place limit sell order
-        sell_order_id = place_limit_order(symbol, "SELL", quantity, sell_price)
+        sell_order_id = place_limit_order(symbol, "SELL", sell_quantity, sell_price)
         if not sell_order_id:
             await query.edit_message_text(f"Failed to place SELL order for {symbol}")
             return
         
-        # Store order info
+        # Store order info with bought quantity
         active_orders[symbol] = {
             'order_id': sell_order_id,
             'sell_price': sell_price,
+            'quantity': bought_quantity,
             'side': 'BUY'
         }
         await query.edit_message_text(f"Position opened with BUY for {symbol} at {best_bid:.2f}\nSELL order placed at {sell_price:.2f}")
@@ -415,7 +398,8 @@ async def check_alerts(bot: Bot):
                 order_info = active_orders[symbol]
                 if order_info['side'] == 'BUY':
                     if cancel_order(symbol, order_info['order_id']):
-                        sell_order_id = place_market_order(symbol, "SELL")
+                        # Use stored quantity for market sell
+                        sell_order_id, _ = place_market_order(symbol, "SELL", quantity=order_info['quantity'])
                         if sell_order_id:
                             del active_orders[symbol]
                             await bot.send_message(chat_id=config.CHAT_ID, 
@@ -427,61 +411,8 @@ async def check_alerts(bot: Bot):
         except Exception as e:
             logger.error(f"Error checking {symbol}: {e}")
 
-# Test full Pionex trade sequence at startup
-async def test_pionex_signature():
-    logger.info("Testing Pionex signature with a sample request")
-    symbol = "LTCUSDT"
-    amount_usdt = 15.0
-
-    # Step 1: Place market BUY order
-    buy_order_id = place_market_order(symbol, "BUY", amount_usdt)
-    if not buy_order_id:
-        logger.error("Test BUY order failed, stopping test")
-        return
-    
-    logger.info(f"Test BUY order placed successfully: {buy_order_id}")
-
-    # Step 2: Get current price and place limit SELL order
-    best_bid, best_ask = get_current_price(symbol)
-    if not best_bid or not best_ask:
-        logger.error("Failed to get current price for SELL order, stopping test")
-        return
-    sell_price = best_ask * 1.01  # Set 1% above best ask
-    symbol_info = get_symbol_info(symbol)
-    if not symbol_info:
-        logger.error("Failed to get symbol info for SELL order, stopping test")
-        return
-    precision = int(symbol_info['basePrecision'])
-    quote_precision = int(symbol_info['quotePrecision'])
-    quantity = amount_usdt / best_bid
-    quantity = float(f"{quantity:.{precision}f}")
-    sell_price = float(f"{sell_price:.{quote_precision}f}")  # Round to quote precision
-    
-    sell_order_id = place_limit_order(symbol, "SELL", quantity, sell_price)
-    if not sell_order_id:
-        logger.error("Test limit SELL order failed, stopping test")
-        return
-    
-    logger.info(f"Test limit SELL order placed successfully: {sell_order_id}")
-
-    # Step 3: Cancel the limit SELL order
-    if not cancel_order(symbol, sell_order_id):
-        logger.error("Test cancel SELL order failed, stopping test")
-        return
-    
-    logger.info(f"Test limit SELL order {sell_order_id} cancelled successfully")
-
-    # Step 4: Place market SELL order
-    market_sell_order_id = place_market_order(symbol, "SELL", amount_usdt)
-    if not market_sell_order_id:
-        logger.error("Test market SELL order failed")
-        return
-    
-    logger.info(f"Test market SELL order placed successfully: {market_sell_order_id}")
-
 async def run_alert_loop(application: Application):
     bot = application.bot
-    await test_pionex_signature()
     while True:
         await check_alerts(bot)
         await asyncio.sleep(300)
