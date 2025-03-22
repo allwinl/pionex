@@ -40,8 +40,8 @@ logging.getLogger('urllib3').setLevel(logging.WARNING)
 logging.getLogger('ccxt').setLevel(logging.WARNING)
 
 # Time intervals
-interval = '4h'
-fib_interval = '12h'
+interval = '1h'
+fib_interval = '8h'
 
 # Pionex API setup
 BASE_URL = "https://api.pionex.com"
@@ -73,7 +73,7 @@ binance = ccxt.binance({
 # Store active orders and last alerts
 active_orders = {}
 last_alert_messages = {}
-ALERT_COOLDOWN = 240  # minutes
+ALERT_COOLDOWN = 30  # minutes
 
 # Pionex API Functions
 def generate_signature(method, path, params, body=None):
@@ -217,7 +217,7 @@ def get_current_price(symbol):
     return None, None
 
 # Binance Data Functions
-def get_historical_data(symbol, interval, limit=200):
+def get_historical_data(symbol, interval, limit=50):
     ohlcv = binance.fetch_ohlcv(symbol, interval, limit=limit)
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
