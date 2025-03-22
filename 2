@@ -97,11 +97,14 @@ def api_request(method, endpoint, params=None, body=None):
 
 def get_symbol_info(symbol):
     endpoint = "/api/v1/common/symbols"
-    params = {"symbols": symbol}
+    # Convert Binance format (XTZUSDT) to Pionex format (XTZ_USDT)
+    pionex_symbol = symbol.replace("USDT", "_USDT")
+    params = {"symbols": pionex_symbol}
     data = api_request("GET", endpoint, params)
-    if data and 'data' in data and 'symbols' in data['data']:
+    logger.info(f"Symbol info response for {pionex_symbol}: {data}")
+    if data and 'data' in data and 'symbols' in data['data'] and data['data']['symbols']:
         return data['data']['symbols'][0]
-    logger.error(f"Failed to fetch symbol info for {symbol}")
+    logger.error(f"Failed to fetch symbol info for {pionex_symbol}")
     return None
 
 def place_market_order(symbol, side, amount_usdt=15.0):
@@ -111,17 +114,18 @@ def place_market_order(symbol, side, amount_usdt=15.0):
     if not symbol_info:
         logger.error(f"No symbol info for {symbol}")
         return None
+    pionex_symbol = symbol.replace("USDT", "_USDT")
     body = {
-        "symbol": symbol,
+        "symbol": pionex_symbol,
         "side": side.upper(),
         "type": "MARKET",
         "amount": str(amount_usdt),  # Amount in USDT for market order
     }
     response = api_request("POST", endpoint, params, body)
-    logger.info(f"Market order response for {symbol}: {response}")
+    logger.info(f"Market order response for {pionex_symbol}: {response}")
     if response and 'data' in response and response['result']:
         return response['data']['orderId']
-    logger.error(f"Market order failed for {symbol}: {response}")
+    logger.error(f"Market order failed for {pionex_symbol}: {response}")
     return None
 
 def place_limit_order(symbol, side, quantity, price):
@@ -131,9 +135,10 @@ def place_limit_order(symbol, side, quantity, price):
     if not symbol_info:
         logger.error(f"No symbol info for {symbol}")
         return None
+    pionex_symbol = symbol.replace("USDT", "_USDT")
     precision = int(symbol_info['basePrecision'])
     body = {
-        "symbol": symbol,
+        "symbol": pionex_symbol,
         "side": side.upper(),
         "type": "LIMIT",
         "size": f"{quantity:.{precision}f}",
@@ -141,26 +146,29 @@ def place_limit_order(symbol, side, quantity, price):
         "IOC": False
     }
     response = api_request("POST", endpoint, params, body)
-    logger.info(f"Limit order response for {symbol}: {response}")
+    logger.info(f"Limit order response for {pionex_symbol}: {response}")
     if response and 'data' in response and response['result']:
         return response['data']['orderId']
-    logger.error(f"Limit order failed for {symbol}: {response}")
+    logger.error(f"Limit order failed for {pionex_symbol}: {response}")
     return None
 
 def cancel_order(symbol, order_id):
     endpoint = "/api/v1/trade/cancelOrder"
-    params = {"symbol": symbol, "orderId": order_id}
+    pionex_symbol = symbol.replace("USDT", "_USDT")
+    params = {"symbol": pionex_symbol, "orderId": order_id}
     response = api_request("POST", endpoint, params)
-    logger.info(f"Cancel order response for {symbol} order {order_id}: {response}")
+    logger.info(f"Cancel order response for {pionex_symbol} order {order_id}: {response}")
     return response and 'result' in response and response['result']
 
 def get_current_price(symbol):
     endpoint = "/api/v1/market/depth"
-    params = {"symbol": symbol}
+    pionex_symbol = symbol.replace("USDT", "_USDT")
+    params = {"symbol": pionex_symbol}
     data = api_request("GET", endpoint, params)
+    logger.info(f"Price response for {pionex_symbol}: {data}")
     if data and 'data' in data and 'bids' in data['data']:
         return float(data['data']['bids'][0][0])
-    logger.error(f"Failed to fetch price for {symbol}: {data}")
+    logger.error(f"Failed to fetch price for {pionex_symbol}: {data}")
     return None
 
 # Binance Data Functions
@@ -281,8 +289,8 @@ async def handle_telegram_callback(update: Update, context: ContextTypes.DEFAULT
         
         # Correctly assign parts
         action = parts[0] + "_" + parts[1]  # "enter_long"
-        symbol = parts[2]  # e.g., "TRXUSDT"
-        close_price = float(parts[3])  # e.g., 0.2369
+        symbol = parts[2]  # e.g., "XTZUSDT"
+        close_price = float(parts[3])  # e.g., 0.691
         
         # Place market buy order
         buy_order_id = place_market_order(symbol, "BUY")
