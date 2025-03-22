@@ -24,18 +24,24 @@ class SuppressTestMessageFilter(logging.Filter):
     def filter(self, record):
         return not (record.levelname == 'INFO' and "Testing Pionex signature with a sample request" in record.msg)
 
-# Set up logging: INFO to console (filtered), DEBUG to file
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('trading_bot.log'),  # All logs to file
-        logging.StreamHandler()  # INFO and above to console with filter
-    ]
-)
+# Set up logging explicitly
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)  # DEBUG for our code
-logger.handlers[1].addFilter(SuppressTestMessageFilter())  # Apply filter to console handler
+
+# Define handlers
+file_handler = logging.FileHandler('trading_bot.log')
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+console_handler.addFilter(SuppressTestMessageFilter())  # Apply filter to console
+
+# Clear any existing handlers and add ours
+logger.handlers.clear()
+logger.addHandler(file_handler)
+logger.addHandler(console_handler)
 
 # Suppress urllib3 and ccxt noise
 logging.getLogger('urllib3').setLevel(logging.WARNING)
