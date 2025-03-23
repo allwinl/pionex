@@ -17,10 +17,27 @@ import hmac
 import hashlib
 from urllib.parse import urlencode
 import json
+import telegram.error
 
 # Set up logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+file_handler = logging.FileHandler('trading_bot.log')
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+logger.handlers.clear()
+logger.addHandler(file_handler)
+logger.addHandler(console_handler)
+
+# Suppress urllib3 and ccxt noise
+logging.getLogger('urllib3').setLevel(logging.WARNING)
+logging.getLogger('ccxt').setLevel(logging.WARNING)
 
 # Time intervals
 interval = '4h'
@@ -31,28 +48,29 @@ BASE_URL = "https://api.pionex.com"
 PIONEX_API_KEY = config.PIONEX_API_KEY
 PIONEX_SECRET_KEY = config.PIONEX_SECRET_KEY
 
-# Fetch symbols from Binance
-url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
-try:
-    response = requests.get(url)
-    response.raise_for_status()
-    data = response.json()
-    SELECTED_SYMBOLS = [
-        s['symbol'] for s in data['symbols']
-        if s['quoteAsset'] == 'USDT' and s['status'] == 'TRADING'
-    ]
-except requests.exceptions.RequestException as e:
-    print(f"Error fetching symbols: {e}")
-    SELECTED_SYMBOLS = []
+# Fetch symbols from Pionex
+def fetch_pionex_symbols():
+    endpoint = "/api/v1/common/symbols"
+    params = {}
+    data = api_request("GET", endpoint, params)
+    if data and 'data' in data and 'symbols' in data['data']:
+        return [s['symbol'].replace("_USDT", "USDT") for s in data['data']['symbols'] 
+                if s['quoteCurrency'] == 'USDT' and s['enable']]
+    logger.error("Failed to fetch symbols from Pionex")
+    return []
+
+SELECTED_SYMBOLS = fetch_pionex_symbols()
 
 # Initialize Binance client
 binance = ccxt.binance({
     'apiKey': config.BINANCE_API_KEY,
     'secret': config.BINANCE_API_SECRET,
+    'enableRateLimit': True,
+    'options': {'defaultType': 'future'}
 })
 
 # Store active orders and last alerts
-active_orders = {}  # {symbol: {'order_id': str, 'sell_price': float, 'side': str}}
+active_orders = {}
 last_alert_messages = {}
 ALERT_COOLDOWN = 240  # minutes
 
@@ -61,11 +79,12 @@ def generate_signature(method, path, params, body=None):
     timestamp = str(int(time.time() * 1000))
     query_params = params.copy()
     query_params['timestamp'] = timestamp
-    sorted_params = urlencode(sorted(query_params.items()))
+    sorted_params = urlencode(sorted(query_params.items()), quote_via=lambda x, *_: x)
     path_url = f"{path}?{sorted_params}"
-    string_to_sign = f"{method}{path_url}"
+    string_to_sign = f"{method.upper()}{path_url}"
     if body:
-        string_to_sign += json.dumps(body, separators=(',', ':'))
+        body_str = json.dumps(body, separators=(',', ':'))
+        string_to_sign += body_str
     signature = hmac.new(
         PIONEX_SECRET_KEY.encode('utf-8'),
         string_to_sign.encode('utf-8'),
@@ -88,38 +107,61 @@ def api_request(method, endpoint, params=None, body=None):
         if method == "GET":
             response = requests.get(url, headers=headers, params=params)
         elif method == "POST":
-            response = requests.post(url, headers=headers, params=params, data=json.dumps(body))
+            response = requests.post(url, headers=headers, params=params, data=json.dumps(body, separators=(',', ':')))
+        elif method == "DELETE":
+            response = requests.delete(url, headers=headers, params=params, data=json.dumps(body, separators=(',', ':')))
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
-        logger.error(f"Pionex API request failed: {e}")
+        logger.error(f"API request failed for {endpoint}: {e}")
         return None
 
 def get_symbol_info(symbol):
     endpoint = "/api/v1/common/symbols"
-    params = {"symbols": symbol}
+    pionex_symbol = symbol.replace("USDT", "_USDT")
+    params = {"symbols": pionex_symbol}
     data = api_request("GET", endpoint, params)
-    if data and 'data' in data and 'symbols' in data['data']:
+    if data and 'data' in data and 'symbols' in data['data'] and data['data']['symbols']:
         return data['data']['symbols'][0]
+    logger.error(f"Failed to fetch symbol info for {pionex_symbol}")
     return None
 
-def place_market_order(symbol, side, amount_usdt=15.0):
+def place_market_order(symbol, side, amount_usdt=15.0, quantity=None):
     endpoint = "/api/v1/trade/order"
     params = {}
     symbol_info = get_symbol_info(symbol)
     if not symbol_info:
         return None
-    precision = int(symbol_info['basePrecision'])
+    pionex_symbol = symbol.replace("USDT", "_USDT")
+    best_bid, best_ask = get_current_price(symbol)
+    if not best_bid or not best_ask:
+        return None
+    quote_precision = int(symbol_info['quotePrecision'])
+    base_precision = int(symbol_info['basePrecision'])
+    min_amount = float(symbol_info['minAmount'])
+    amount_usdt = max(amount_usdt, min_amount)
     body = {
-        "symbol": symbol,
+        "symbol": pionex_symbol,
         "side": side.upper(),
         "type": "MARKET",
-        "amount": str(amount_usdt),  # Amount in USDT for market order
     }
+    if side.upper() == "BUY":
+        body["amount"] = f"{amount_usdt:.{quote_precision}f}"
+        # Calculate quantity for storage
+        buy_quantity = amount_usdt / best_bid
+        buy_quantity = f"{buy_quantity:.{base_precision}f}"
+    else:  # SELL
+        if quantity is None:  # Fallback if quantity not provided
+            quantity = amount_usdt / best_bid
+        body["size"] = f"{quantity:.{base_precision}f}"
+        buy_quantity = None  # No need to store for SELL
+
     response = api_request("POST", endpoint, params, body)
     if response and 'data' in response and response['result']:
-        return response['data']['orderId']
-    return None
+        logger.info(f"Market {side} order placed for {pionex_symbol}: {response['data']['orderId']}")
+        return response['data']['orderId'], buy_quantity if side.upper() == "BUY" else None
+    logger.error(f"Market {side} order failed for {pionex_symbol}: {response}")
+    return None, None
 
 def place_limit_order(symbol, side, quantity, price):
     endpoint = "/api/v1/trade/order"
@@ -127,36 +169,54 @@ def place_limit_order(symbol, side, quantity, price):
     symbol_info = get_symbol_info(symbol)
     if not symbol_info:
         return None
-    precision = int(symbol_info['basePrecision'])
+    pionex_symbol = symbol.replace("USDT", "_USDT")
+    quote_precision = int(symbol_info['quotePrecision'])
+    base_precision = int(symbol_info['basePrecision'])
+    price = float(f"{price:.{quote_precision}f}")
     body = {
-        "symbol": symbol,
+        "symbol": pionex_symbol,
         "side": side.upper(),
         "type": "LIMIT",
-        "size": f"{quantity:.{precision}f}",
-        "price": str(price),
+        "size": f"{quantity:.{base_precision}f}",
+        "price": f"{price:.{quote_precision}f}",
         "IOC": False
     }
     response = api_request("POST", endpoint, params, body)
     if response and 'data' in response and response['result']:
+        logger.info(f"Limit {side} order placed for {pionex_symbol}: {response['data']['orderId']}")
         return response['data']['orderId']
+    logger.error(f"Limit {side} order failed for {pionex_symbol}: {response}")
     return None
 
 def cancel_order(symbol, order_id):
-    endpoint = "/api/v1/trade/cancelOrder"
-    params = {"symbol": symbol, "orderId": order_id}
-    response = api_request("POST", endpoint, params)
-    return response and 'result' in response and response['result']
+    endpoint = "/api/v1/trade/order"
+    pionex_symbol = symbol.replace("USDT", "_USDT")
+    params = {}
+    body = {
+        "symbol": pionex_symbol,
+        "orderId": order_id
+    }
+    response = api_request("DELETE", endpoint, params, body)
+    if response and 'result' in response and response['result']:
+        logger.info(f"Order {order_id} cancelled for {pionex_symbol}")
+        return True
+    logger.error(f"Cancel order failed for {pionex_symbol} order {order_id}: {response}")
+    return False
 
 def get_current_price(symbol):
     endpoint = "/api/v1/market/depth"
-    params = {"symbol": symbol}
+    pionex_symbol = symbol.replace("USDT", "_USDT")
+    params = {"symbol": pionex_symbol}
     data = api_request("GET", endpoint, params)
-    if data and 'data' in data and 'bids' in data['data']:
-        return float(data['data']['bids'][0][0])
-    return None
+    if data and 'data' in data and 'bids' in data['data'] and 'asks' in data['data']:
+        best_bid = float(data['data']['bids'][0][0])
+        best_ask = float(data['data']['asks'][0][0])
+        return best_bid, best_ask
+    logger.error(f"Failed to fetch price for {pionex_symbol}")
+    return None, None
 
 # Binance Data Functions
-def get_historical_data(symbol, interval, limit=100):
+def get_historical_data(symbol, interval, limit=50):
     ohlcv = binance.fetch_ohlcv(symbol, interval, limit=limit)
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -254,7 +314,7 @@ async def send_telegram_message(bot: Bot, chat_id: str, symbol: str, message: st
         return
 
     await bot.send_photo(chat_id=chat_id, photo=image_buffer)
-    keyboard = [[InlineKeyboardButton("Buy", callback_data=f"enter_long_{symbol}_{close_price}")]]
+    keyboard = [[InlineKeyboardButton("BUY", callback_data=f"buy_{symbol}_{close_price}")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await bot.send_message(chat_id=chat_id, text=message, reply_markup=reply_markup)
     
@@ -263,47 +323,59 @@ async def send_telegram_message(bot: Bot, chat_id: str, symbol: str, message: st
 
 async def handle_telegram_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     try:
-        callback_data = query.data
-        logger.info(f"Received callback data: {callback_data}")
+        await query.answer()
+    except telegram.error.BadRequest as e:
+        logger.warning(f"Failed to answer callback query: {e}")
+    
+    try:
+        callback_data = query.data.replace('-', '_')
         parts = callback_data.split('_')
-        if len(parts) < 4:
+        if len(parts) != 3:
             raise ValueError(f"Invalid callback data format: {callback_data}")
         
-        action, symbol, close_price = parts[2], parts[3], float(parts[4])
+        action = parts[0]
+        symbol = parts[1]
+        close_price = float(parts[2])
         
-        # Place market buy order
-        buy_order_id = place_market_order(symbol, "BUY")
+        if action != "buy":
+            raise ValueError(f"Unknown action: {action}")
+        
+        # Place market buy order and store quantity
+        buy_order_id, buy_quantity = place_market_order(symbol, "BUY")
         if not buy_order_id:
-            await query.edit_message_text(f"Failed to place buy order for {symbol}")
+            await query.edit_message_text(f"Failed to place BUY order for {symbol}")
             return
         
         # Get current price and calculate sell price
-        current_price = get_current_price(symbol)
-        if not current_price:
+        best_bid, best_ask = get_current_price(symbol)
+        if not best_bid or not best_ask:
             await query.edit_message_text(f"Failed to get price for {symbol}")
             return
-        sell_price = current_price * 1.01
-        quantity = 15.0 / current_price  # $15 worth
+        sell_price = best_ask * 1.01
         symbol_info = get_symbol_info(symbol)
-        if symbol_info:
-            precision = int(symbol_info['basePrecision'])
-            quantity = float(f"{quantity:.{precision}f}")
+        if not symbol_info:
+            await query.edit_message_text(f"Failed to get symbol info for {symbol}")
+            return
+        precision = int(symbol_info['basePrecision'])
+        quote_precision = int(symbol_info['quotePrecision'])
+        quantity = float(f"{float(buy_quantity):.{precision}f}")  # Use stored buy quantity
+        sell_price = float(f"{sell_price:.{quote_precision}f}")
         
         # Place limit sell order
         sell_order_id = place_limit_order(symbol, "SELL", quantity, sell_price)
         if not sell_order_id:
-            await query.edit_message_text(f"Failed to place sell order for {symbol}")
+            await query.edit_message_text(f"Failed to place SELL order for {symbol}")
             return
         
-        # Store order info
+        # Store order info with quantity
         active_orders[symbol] = {
             'order_id': sell_order_id,
             'sell_price': sell_price,
-            'side': 'LONG'
+            'side': 'BUY',
+            'quantity': quantity
         }
-        await query.edit_message_text(f"Long position opened for {symbol} at {current_price:.2f}\nSell order placed at {sell_price:.2f}")
+        await query.edit_message_text(f"Position opened with BUY for {symbol} at {best_bid:.2f}\nSELL order placed at {sell_price:.2f}")
     except Exception as e:
         logger.error(f"Error in callback handler: {e}")
         await query.edit_message_text(f"Error processing request: {str(e)}")
@@ -321,22 +393,19 @@ async def check_alerts(bot: Bot):
                 image_buffer = plot_candles(historical_data, fib_data, symbol, title)
                 await send_telegram_message(bot, config.CHAT_ID, symbol, message, image_buffer, historical_data['Close'].iloc[-1])
             
-            # Check for short condition to close long positions
             if hist_cross_under and symbol in active_orders:
                 order_info = active_orders[symbol]
-                if order_info['side'] == 'LONG':
-                    # Cancel existing sell order
+                if order_info['side'] == 'BUY':
                     if cancel_order(symbol, order_info['order_id']):
-                        # Place market sell order
-                        sell_order_id = place_market_order(symbol, "SELL")
+                        sell_order_id, _ = place_market_order(symbol, "SELL", quantity=order_info['quantity'])
                         if sell_order_id:
                             del active_orders[symbol]
                             await bot.send_message(chat_id=config.CHAT_ID, 
-                                                 text=f"Long position closed for {symbol} due to histogram cross under")
+                                                 text=f"Position closed with SELL for {symbol} due to histogram cross under")
                         else:
-                            logger.error(f"Failed to place market sell for {symbol}")
+                            logger.error(f"Failed to place market SELL for {symbol}")
                     else:
-                        logger.error(f"Failed to cancel sell order for {symbol}")
+                        logger.error(f"Failed to cancel SELL order for {symbol}")
         except Exception as e:
             logger.error(f"Error checking {symbol}: {e}")
 
