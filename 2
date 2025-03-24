@@ -40,40 +40,13 @@ logging.getLogger('urllib3').setLevel(logging.WARNING)
 logging.getLogger('ccxt').setLevel(logging.WARNING)
 
 # Time intervals
-interval = '1h'
-fib_interval = '8h'
+interval = '4h'
+fib_interval = '12h'
 
 # Pionex API setup
 BASE_URL = "https://api.pionex.com"
 PIONEX_API_KEY = config.PIONEX_API_KEY
 PIONEX_SECRET_KEY = config.PIONEX_SECRET_KEY
-
-# Fetch symbols from Binance
-url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
-try:
-    response = requests.get(url)
-    response.raise_for_status()
-    data = response.json()
-    SELECTED_SYMBOLS = [
-        s['symbol'] for s in data['symbols']
-        if s['quoteAsset'] == 'USDT' and s['status'] == 'TRADING'
-    ]
-except requests.exceptions.RequestException as e:
-    logger.error(f"Error fetching symbols from Binance Futures: {e}")
-    SELECTED_SYMBOLS = []
-
-# Initialize Binance client
-binance = ccxt.binance({
-    'apiKey': config.BINANCE_API_KEY,
-    'secret': config.BINANCE_API_SECRET,
-    'enableRateLimit': True,
-    'options': {'defaultType': 'future'}
-})
-
-# Store active orders and last alerts
-active_orders = {}
-last_alert_messages = {}
-ALERT_COOLDOWN = 30  # minutes
 
 # Pionex API Functions
 def generate_signature(method, path, params, body=None):
@@ -117,6 +90,32 @@ def api_request(method, endpoint, params=None, body=None):
         logger.error(f"API request failed for {endpoint}: {e}")
         return None
 
+# Fetch symbols from Pionex
+def fetch_pionex_symbols():
+    endpoint = "/api/v1/common/symbols"
+    params = {}
+    data = api_request("GET", endpoint, params)
+    if data and 'data' in data and 'symbols' in data['data']:
+        return [s['symbol'].replace("_USDT", "USDT") for s in data['data']['symbols'] 
+                if s['quoteCurrency'] == 'USDT' and s['enable']]
+    logger.error("Failed to fetch symbols from Pionex")
+    return []
+
+SELECTED_SYMBOLS = fetch_pionex_symbols()
+
+# Initialize Binance client
+binance = ccxt.binance({
+    'apiKey': config.BINANCE_API_KEY,
+    'secret': config.BINANCE_API_SECRET,
+    'enableRateLimit': True,
+    'options': {'defaultType': 'future'}
+})
+
+# Store active orders and last alerts
+active_orders = {}
+last_alert_messages = {}
+ALERT_COOLDOWN = 240  # minutes
+
 def get_symbol_info(symbol):
     endpoint = "/api/v1/common/symbols"
     pionex_symbol = symbol.replace("USDT", "_USDT")
@@ -140,27 +139,27 @@ def place_market_order(symbol, side, amount_usdt=15.0, quantity=None):
     quote_precision = int(symbol_info['quotePrecision'])
     base_precision = int(symbol_info['basePrecision'])
     min_amount = float(symbol_info['minAmount'])
+    amount_usdt = max(amount_usdt, min_amount)
     body = {
         "symbol": pionex_symbol,
         "side": side.upper(),
         "type": "MARKET",
     }
     if side.upper() == "BUY":
-        amount_usdt = max(amount_usdt, min_amount)
         body["amount"] = f"{amount_usdt:.{quote_precision}f}"
-        bought_quantity = amount_usdt / best_ask  # Approximate quantity for tracking
-        bought_quantity = float(f"{bought_quantity:.{base_precision}f}")
+        # Calculate quantity for storage
+        buy_quantity = amount_usdt / best_bid
+        buy_quantity = f"{buy_quantity:.{base_precision}f}"
     else:  # SELL
-        if quantity is None:
-            logger.error(f"No quantity provided for SELL order on {pionex_symbol}")
-            return None
+        if quantity is None:  # Fallback if quantity not provided
+            quantity = amount_usdt / best_bid
         body["size"] = f"{quantity:.{base_precision}f}"
-        bought_quantity = None  # Not needed for SELL
+        buy_quantity = None  # No need to store for SELL
 
     response = api_request("POST", endpoint, params, body)
     if response and 'data' in response and response['result']:
         logger.info(f"Market {side} order placed for {pionex_symbol}: {response['data']['orderId']}")
-        return response['data']['orderId'], bought_quantity if side.upper() == "BUY" else None
+        return response['data']['orderId'], buy_quantity if side.upper() == "BUY" else None
     logger.error(f"Market {side} order failed for {pionex_symbol}: {response}")
     return None, None
 
@@ -217,7 +216,7 @@ def get_current_price(symbol):
     return None, None
 
 # Binance Data Functions
-def get_historical_data(symbol, interval, limit=50):
+def get_historical_data(symbol, interval, limit=200):
     ohlcv = binance.fetch_ohlcv(symbol, interval, limit=limit)
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -342,8 +341,8 @@ async def handle_telegram_callback(update: Update, context: ContextTypes.DEFAULT
         if action != "buy":
             raise ValueError(f"Unknown action: {action}")
         
-        # Place market buy order and get quantity
-        buy_order_id, bought_quantity = place_market_order(symbol, "BUY")
+        # Place market buy order and store quantity
+        buy_order_id, buy_quantity = place_market_order(symbol, "BUY")
         if not buy_order_id:
             await query.edit_message_text(f"Failed to place BUY order for {symbol}")
             return
@@ -360,7 +359,9 @@ async def handle_telegram_callback(update: Update, context: ContextTypes.DEFAULT
             return
         precision = int(symbol_info['basePrecision'])
         quote_precision = int(symbol_info['quotePrecision'])
-        sell_quantity = float(f"{bought_quantity:.{precision}f}")
+        # Adjust sell quantity for fees (0.999 factor)
+        sell_quantity = float(buy_quantity) * 0.999
+        sell_quantity = float(f"{sell_quantity:.{precision}f}")
         sell_price = float(f"{sell_price:.{quote_precision}f}")
         
         # Place limit sell order
@@ -369,12 +370,12 @@ async def handle_telegram_callback(update: Update, context: ContextTypes.DEFAULT
             await query.edit_message_text(f"Failed to place SELL order for {symbol}")
             return
         
-        # Store order info with bought quantity
+        # Store order info with adjusted sell quantity
         active_orders[symbol] = {
             'order_id': sell_order_id,
             'sell_price': sell_price,
-            'quantity': bought_quantity,
-            'side': 'BUY'
+            'side': 'BUY',
+            'quantity': sell_quantity  # Store adjusted quantity for market sell
         }
         await query.edit_message_text(f"Position opened with BUY for {symbol} at {best_bid:.2f}\nSELL order placed at {sell_price:.2f}")
     except Exception as e:
@@ -398,7 +399,6 @@ async def check_alerts(bot: Bot):
                 order_info = active_orders[symbol]
                 if order_info['side'] == 'BUY':
                     if cancel_order(symbol, order_info['order_id']):
-                        # Use stored quantity for market sell
                         sell_order_id, _ = place_market_order(symbol, "SELL", quantity=order_info['quantity'])
                         if sell_order_id:
                             del active_orders[symbol]
