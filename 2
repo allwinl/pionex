@@ -40,7 +40,7 @@ logging.getLogger('urllib3').setLevel(logging.WARNING)
 logging.getLogger('ccxt').setLevel(logging.WARNING)
 
 # Time intervals
-interval = '15m'  # Changed to 15m timeframe
+interval = '15m'
 fib_interval = '12h'
 
 # Pionex API setup
@@ -239,10 +239,11 @@ def calculate_ema(df, period):
     return ta.trend.EMAIndicator(df['Close'], window=period).ema_indicator()
 
 def calculate_amplitude_ratio(df):
-    """Calculate daily amplitude ratio (high-low)/low * 100"""
+    """Calculate daily amplitude ratio (high-low)/low * 100 and check if any of last 3 days > 30%"""
     daily_df = df.resample('1D').agg({'High': 'max', 'Low': 'min'})
     daily_df['amplitude_ratio'] = ((daily_df['High'] - daily_df['Low']) / daily_df['Low']) * 100
-    return daily_df['amplitude_ratio'].iloc[-3:].mean()  # Average of last 3 days
+    last_3_days = daily_df['amplitude_ratio'].iloc[-3:]
+    return any(last_3_days > 30), last_3_days.max()  # Returns True if any day > 30% and max ratio
 
 def check_ema_cross(df):
     short_ema = calculate_ema(df, 5)
@@ -250,10 +251,10 @@ def check_ema_cross(df):
     df['short_ema'] = short_ema
     df['long_ema'] = long_ema
     
-    ema_cross_over = (df['short_ema'].iloc[-1] > df['long_ema'].iloc[-1] and 
-                     df['short_ema'].iloc[-2] <= df['long_ema'].iloc[-2])
-    ema_cross_under = (df['short_ema'].iloc[-1] < df['long_ema'].iloc[-1] and 
-                      df['short_ema'].iloc[-2] >= df['long_ema'].iloc[-2])
+    ema_cross_over = (df['short_ema'].iloc[-2] > df['long_ema'].iloc[-1] and 
+                     df['short_ema'].iloc[-3] <= df['long_ema'].iloc[-2])
+    ema_cross_under = (df['short_ema'].iloc[-2] < df['long_ema'].iloc[-1] and 
+                      df['short_ema'].iloc[-3] >= df['long_ema'].iloc[-2])
     return ema_cross_over, ema_cross_under
 
 def calculate_fibonacci_levels(df):
@@ -403,35 +404,44 @@ async def handle_telegram_callback(update: Update, context: ContextTypes.DEFAULT
 async def check_alerts(bot: Bot):
     for symbol in SELECTED_SYMBOLS:
         try:
-            # Get 1-day timeframe data for amplitude calculation (last 3 days)
+            # Get data
             daily_data = get_historical_data(symbol, '1d', limit=5)
-            amplitude_ratio = calculate_amplitude_ratio(daily_data)
-            
-            # Only process symbols with amplitude ratio > 30%
-            if amplitude_ratio <= 30:
-                continue
-                
-            historical_data = get_historical_data(symbol, interval, limit=201)  # Need 200+ for EMA
+            historical_data = get_historical_data(symbol, interval, limit=201)
             fib_data = get_historical_data(symbol, fib_interval, limit=20)
+            
+            # Check conditions
+            has_high_amplitude, max_amplitude = calculate_amplitude_ratio(daily_data)
             ema_cross_over, ema_cross_under = check_ema_cross(historical_data)
 
-            if ema_cross_over:
-                message = f"Buy #{symbol} (Amplitude Ratio: {amplitude_ratio:.2f}%)"
+            # Buy condition with amplitude check
+            if ema_cross_over and has_high_amplitude:
+                message = f"Buy #{symbol} (Max Amplitude: {max_amplitude:.2f}%)"
                 title = f'EMA 5 Cross Over EMA 200 {symbol}'
                 image_buffer = plot_candles(historical_data, fib_data, symbol, title)
                 await send_telegram_message(bot, config.CHAT_ID, symbol, message, image_buffer, historical_data['Close'].iloc[-1])
             
+            # Sell condition (no amplitude check)
             if ema_cross_under and symbol in active_orders:
                 order_info = active_orders[symbol]
                 if order_info['side'] == 'BUY':
+                    # Cancel existing limit order
                     if cancel_order(symbol, order_info['order_id']):
+                        # Attempt market sell
                         sell_order_id, _ = place_market_order(symbol, "SELL", quantity=order_info['quantity'])
                         if sell_order_id:
                             del active_orders[symbol]
                             await bot.send_message(chat_id=config.CHAT_ID, 
-                                                text=f"Position closed with SELL for {symbol} due to EMA cross under")
+                                                text=f"Position closed with MARKET SELL for {symbol} due to EMA cross under")
                         else:
-                            logger.error(f"Failed to place market SELL for {symbol}")
+                            # Retry market sell if first attempt fails
+                            logger.error(f"First market SELL attempt failed for {symbol}, retrying...")
+                            retry_sell_order_id, _ = place_market_order(symbol, "SELL", quantity=order_info['quantity'])
+                            if retry_sell_order_id:
+                                del active_orders[symbol]
+                                await bot.send_message(chat_id=config.CHAT_ID, 
+                                                    text=f"Position closed with MARKET SELL (retry) for {symbol} due to EMA cross under")
+                            else:
+                                logger.error(f"Retry market SELL failed for {symbol}, position remains open")
                     else:
                         logger.error(f"Failed to cancel SELL order for {symbol}")
         except Exception as e:
