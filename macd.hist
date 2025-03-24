@@ -114,7 +114,7 @@ binance = ccxt.binance({
 # Store active orders and last alerts
 active_orders = {}
 last_alert_messages = {}
-ALERT_COOLDOWN = 240  # minutes
+ALERT_COOLDOWN = 60  # minutes
 
 def get_symbol_info(symbol):
     endpoint = "/api/v1/common/symbols"
