@@ -251,8 +251,8 @@ def check_ema_cross(df):
     df['short_ema'] = short_ema
     df['long_ema'] = long_ema
     
-    ema_cross_over = (df['short_ema'].iloc[-1] > df['long_ema'].iloc[-1] #and df['short_ema'].iloc[-3] <= df['long_ema'].iloc[-2])
-    ema_cross_under = (df['short_ema'].iloc[-1] < df['long_ema'].iloc[-1] #and df['short_ema'].iloc[-3] <= df['long_ema'].iloc[-2])
+    ema_cross_over = df['short_ema'].iloc[-2] > df['long_ema'].iloc[-2]
+    ema_cross_under = df['short_ema'].iloc[-2] < df['long_ema'].iloc[-2]
     return ema_cross_over, ema_cross_under
 
 def calculate_fibonacci_levels(df):
