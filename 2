@@ -347,6 +347,9 @@ async def handle_telegram_callback(update: Update, context: ContextTypes.DEFAULT
             await query.edit_message_text(f"Failed to place BUY order for {symbol}")
             return
         
+        # Wait 3 seconds to allow balance to update
+        await asyncio.sleep(3)
+        
         # Get current price and calculate sell price
         best_bid, best_ask = get_current_price(symbol)
         if not best_bid or not best_ask:
