@@ -216,7 +216,7 @@ def get_current_price(symbol):
     return None, None
 
 # Binance Data Functions
-def get_historical_data(symbol, interval, limit=200):
+def get_historical_data(symbol, interval, limit=75):
     ohlcv = binance.fetch_ohlcv(symbol, interval, limit=limit)
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -348,7 +348,7 @@ async def handle_telegram_callback(update: Update, context: ContextTypes.DEFAULT
             return
         
         # Wait 3 seconds to allow balance to update
-        await asyncio.sleep(3)
+        await asyncio.sleep(5)
         
         # Get current price and calculate sell price
         best_bid, best_ask = get_current_price(symbol)
