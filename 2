@@ -126,6 +126,18 @@ def get_symbol_info(symbol):
     logger.error(f"Failed to fetch symbol info for {pionex_symbol}")
     return None
 
+def get_account_balance(symbol):
+    endpoint = "/api/v1/account/balances"
+    params = {}
+    data = api_request("GET", endpoint, params)
+    if data and 'data' in data and 'balances' in data['data']:
+        base_currency = symbol.replace("USDT", "")
+        for balance in data['data']['balances']:
+            if balance['coin'] == base_currency:
+                return float(balance['free'])
+    logger.error(f"Failed to fetch balance for {symbol}")
+    return 0.0
+
 def place_market_order(symbol, side, amount_usdt=15.0, quantity=None):
     endpoint = "/api/v1/trade/order"
     params = {}
@@ -147,14 +159,13 @@ def place_market_order(symbol, side, amount_usdt=15.0, quantity=None):
     }
     if side.upper() == "BUY":
         body["amount"] = f"{amount_usdt:.{quote_precision}f}"
-        # Calculate quantity for storage
         buy_quantity = amount_usdt / best_bid
         buy_quantity = f"{buy_quantity:.{base_precision}f}"
     else:  # SELL
-        if quantity is None:  # Fallback if quantity not provided
+        if quantity is None:
             quantity = amount_usdt / best_bid
         body["size"] = f"{quantity:.{base_precision}f}"
-        buy_quantity = None  # No need to store for SELL
+        buy_quantity = None
 
     response = api_request("POST", endpoint, params, body)
     if response and 'data' in response and response['result']:
@@ -216,7 +227,7 @@ def get_current_price(symbol):
     return None, None
 
 # Binance Data Functions
-def get_historical_data(symbol, interval, limit=75):
+def get_historical_data(symbol, interval, limit=200):
     ohlcv = binance.fetch_ohlcv(symbol, interval, limit=limit)
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -347,8 +358,14 @@ async def handle_telegram_callback(update: Update, context: ContextTypes.DEFAULT
             await query.edit_message_text(f"Failed to place BUY order for {symbol}")
             return
         
-        # Wait 3 seconds to allow balance to update
-        await asyncio.sleep(5)
+        logger.info(f"Buy quantity for {symbol}: {buy_quantity}")
+        
+        # Wait 10 seconds to allow balance to update
+        await asyncio.sleep(10)
+        
+        # Check available balance
+        available_balance = get_account_balance(symbol)
+        logger.info(f"Available balance for {symbol} after BUY: {available_balance}")
         
         # Get current price and calculate sell price
         best_bid, best_ask = get_current_price(symbol)
@@ -362,15 +379,24 @@ async def handle_telegram_callback(update: Update, context: ContextTypes.DEFAULT
             return
         precision = int(symbol_info['basePrecision'])
         quote_precision = int(symbol_info['quotePrecision'])
-        # Adjust sell quantity for fees (0.999 factor)
-        sell_quantity = float(buy_quantity) * 0.999
+        # Adjust sell quantity for fees (0.995 factor)
+        sell_quantity = float(buy_quantity) * 0.995
         sell_quantity = float(f"{sell_quantity:.{precision}f}")
         sell_price = float(f"{sell_price:.{quote_precision}f}")
+        
+        logger.info(f"Attempting to sell {sell_quantity} of {symbol} at {sell_price}")
+        
+        # Check if enough balance for sell
+        if available_balance < sell_quantity:
+            await query.edit_message_text(f"Insufficient balance for SELL: {available_balance} < {sell_quantity}")
+            logger.error(f"Insufficient balance for {symbol}: {available_balance} < {sell_quantity}")
+            return
         
         # Place limit sell order
         sell_order_id = place_limit_order(symbol, "SELL", sell_quantity, sell_price)
         if not sell_order_id:
             await query.edit_message_text(f"Failed to place SELL order for {symbol}")
+            logger.error(f"SELL order failed for {symbol} after BUY, not storing in active_orders")
             return
         
         # Store order info with adjusted sell quantity
@@ -378,7 +404,7 @@ async def handle_telegram_callback(update: Update, context: ContextTypes.DEFAULT
             'order_id': sell_order_id,
             'sell_price': sell_price,
             'side': 'BUY',
-            'quantity': sell_quantity  # Store adjusted quantity for market sell
+            'quantity': sell_quantity
         }
         await query.edit_message_text(f"Position opened with BUY for {symbol} at {best_bid:.2f}\nSELL order placed at {sell_price:.2f}")
     except Exception as e:
