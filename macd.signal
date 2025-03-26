@@ -261,8 +261,7 @@ def check_macd_cross(df, symbol):
     df = calculate_macd(df)
     
     # Check for bullish crossover (MACD crosses above signal line)
-    macd_cross_over = (df['macd'].iloc[-2] > df['signal'].iloc[-2] and 
-                      df['macd'].iloc[-3] <= df['signal'].iloc[-3])
+    macd_cross_over = df['macd'].iloc[-1] > df['signal'].iloc[-1] #and df['macd'].iloc[-2] <= df['signal'].iloc[-2])
     
     # Check for bearish crossover (MACD crosses below signal line)
     macd_cross_under = df['histogram'].iloc[-2] < df['histogram'].iloc[-3]
