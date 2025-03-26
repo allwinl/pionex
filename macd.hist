@@ -41,7 +41,7 @@ logging.getLogger('ccxt').setLevel(logging.WARNING)
 
 # Time intervals
 interval = '1d'
-fib_interval = '1w'
+fib_interval = '3d'
 
 # Pionex API setup
 BASE_URL = "https://api.pionex.com"
