@@ -40,8 +40,8 @@ logging.getLogger('urllib3').setLevel(logging.WARNING)
 logging.getLogger('ccxt').setLevel(logging.WARNING)
 
 # Time intervals
-interval = '4h'
-fib_interval = '12h'
+interval = '1d'
+fib_interval = '1w'
 
 # Pionex API setup
 BASE_URL = "https://api.pionex.com"
@@ -138,7 +138,7 @@ def get_account_balance(symbol):
     logger.error(f"Failed to fetch balance for {symbol}")
     return 0.0
 
-def place_market_order(symbol, side, amount_usdt=15.0, quantity=None):
+def place_market_order(symbol, side, amount_usdt=13.0, quantity=None):
     endpoint = "/api/v1/trade/order"
     params = {}
     symbol_info = get_symbol_info(symbol)
