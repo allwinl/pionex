@@ -265,7 +265,7 @@ def check_macd_cross(df, symbol):
                       df['macd'].iloc[-3] <= df['signal'].iloc[-3])
     
     # Check for bearish crossover (MACD crosses below signal line)
-    macd_cross_under = df['histogram'].iloc[-2] < df['histogram'].iloc[-3] and df['histogram'].iloc[-3] > df['histogram'].iloc[-4]
+    macd_cross_under = df['histogram'].iloc[-2] < df['histogram'].iloc[-3]
     
     # Apply amplitude ratio check only for cross over (buy signal)
     if macd_cross_over:
