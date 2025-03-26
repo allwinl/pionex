@@ -114,7 +114,7 @@ binance = ccxt.binance({
 # Store active orders and last alerts
 active_orders = {}
 last_alert_messages = {}
-ALERT_COOLDOWN = 60  # minutes
+ALERT_COOLDOWN = 15  # minutes
 
 def get_symbol_info(symbol):
     endpoint = "/api/v1/common/symbols"
@@ -169,7 +169,7 @@ def place_market_order(symbol, side, amount_usdt=15.0, quantity=None):
 
     response = api_request("POST", endpoint, params, body)
     if response and 'data' in response and response['result']:
-        logger.info(f"Market {side} order placed for {pionex_symbol}: {response['data']['orderId']}")
+        logger.info(f"Market #{side} order placed for #{pionex_symbol}: {response['data']['orderId']}")
         return response['data']['orderId'], buy_quantity if side.upper() == "BUY" else None
     logger.error(f"Market {side} order failed for {pionex_symbol}: {response}")
     return None, None
@@ -194,7 +194,7 @@ def place_limit_order(symbol, side, quantity, price):
     }
     response = api_request("POST", endpoint, params, body)
     if response and 'data' in response and response['result']:
-        logger.info(f"Limit {side} order placed for {pionex_symbol}: {response['data']['orderId']}")
+        logger.info(f"Limit {side} order placed for #{pionex_symbol}: {response['data']['orderId']}")
         return response['data']['orderId']
     logger.error(f"Limit {side} order failed for {pionex_symbol}: {response}")
     return None
@@ -265,8 +265,7 @@ def check_macd_cross(df, symbol):
                       df['macd'].iloc[-3] <= df['signal'].iloc[-3])
     
     # Check for bearish crossover (MACD crosses below signal line)
-    macd_cross_under = (df['macd'].iloc[-2] < df['signal'].iloc[-2] and 
-                       df['macd'].iloc[-3] >= df['signal'].iloc[-3])
+    macd_cross_under = df['histogram'].iloc[-2] < df['histogram'].iloc[-3] and df['histogram'].iloc[-3] > df['histogram'].iloc[-4]
     
     # Apply amplitude ratio check only for cross over (buy signal)
     if macd_cross_over:
