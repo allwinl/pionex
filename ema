@@ -250,8 +250,7 @@ def check_ema_cross(df):
     long_ema = calculate_ema(df, 7)
     
     # Check for crossover (3-period EMA crosses above 7-period EMA)
-    ema_cross_over = (short_ema.iloc[-2] > long_ema.iloc[-2] and 
-                     short_ema.iloc[-3] <= long_ema.iloc[-3])
+    ema_cross_over = (short_ema.iloc[-2] > long_ema.iloc[-2] and short_ema.iloc[-3] > long_ema.iloc[-3] and short_ema.iloc[-4] <= long_ema.iloc[-4])
     
     # Check for crossunder (3-period EMA crosses below 7-period EMA)
     ema_cross_under = (short_ema.iloc[-2] < long_ema.iloc[-2] and 
