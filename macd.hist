@@ -40,8 +40,8 @@ logging.getLogger('urllib3').setLevel(logging.WARNING)
 logging.getLogger('ccxt').setLevel(logging.WARNING)
 
 # Time intervals
-interval = '12h'
-fib_interval = '3d'
+interval = '8h'
+fib_interval = '1d'
 
 # Pionex API setup
 BASE_URL = "https://api.pionex.com"
