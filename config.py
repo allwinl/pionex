@@ -14,3 +14,19 @@ BINANCE_API_SECRET = 'RhAuSUL6iipT1o1yA9yDTdZoRTdqcLM2KSPYxtvrLMBmGlY8KeljnaNoPf
 
 PIONEX_API_KEY = "6P2BU19dXFdN8SjLgbSnvbECny5HbT8nGXKtQf5yDeYB6fq3yGeeZ1CzafRhMnm3L5"
 PIONEX_SECRET_KEY = "MlGRRZYxIXPxatJEYv1afhpFgGQAfUAH76LAgzvKutEa2tqRtjnXXbGDLuViuT5H"
+
+
+
+# config.py
+# Telegram bot tokens
+BUY_BOT_TOKEN = "7619077339:AAGvLzsABJRFKsv50TgI1XxMNhVvtED-E_4"  # Token for buy messages
+SELL_BOT_TOKEN = "7291265041:AAHAsg1hnD1fe4eINhfd-86425ReI04lYJY" 
+
+# Telegram bot tokens
+TELEGRAM_TOKEN = "7619077339:AAGvLzsABJRFKsv50TgI1XxMNhVvtED-E_4"  # Token for buy messages
+#TELEGRAM_TOKEN = "8066951467:AAHOaFDL9kixcdwtjbwb-szDgnl8R9Vz8AI" 
+
+ # Token for sell messages
+CHAT_ID = "1385370555"  # Your Telegram chat ID
+
+
