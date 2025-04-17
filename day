@@ -197,13 +197,14 @@ def check_and_trade(symbol, bot, chat_id):
             return
 
         # Fetch 1-minute candle data
-        minute_data = get_historical_data(symbol, '1m', limit=1)
+        minute_data = get_historical_data(symbol, '1m', limit=5)
         if minute_data is None or minute_data.empty:
             logger.error(f"No 1-minute data for {symbol}")
             return
 
         daily_open = daily_data['Open'].iloc[-1]
         current_price = minute_data['Close'].iloc[-1]
+        previous_price = minute_data['Close'].iloc[-2]
 
         logger.info(f"{symbol} - Daily Open: {daily_open}, Current 1m Price: {current_price}")
 
@@ -211,7 +212,7 @@ def check_and_trade(symbol, bot, chat_id):
         last_order_side = last_orders.get(symbol)
 
         # Trading logic
-        if current_price > daily_open:
+        if current_price > daily_open and previous_price < daily_open:
             if last_order_side != "BUY":
                 order_id = place_market_order(symbol, "BUY")
                 if order_id:
@@ -288,7 +289,7 @@ async def run_trading_loop(application: Application):
             logger.info(f"Completed trading cycle for {SELECTED_SYMBOLS}")
         else:
             logger.info("No symbols selected, skipping trading cycle")
-        await asyncio.sleep(60)  # Run every minute
+        await asyncio.sleep(10)  # Run every minute
 
 # Main Function
 async def main():
