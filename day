@@ -43,8 +43,8 @@ PIONEX_API_KEY = config.PIONEX_API_KEY
 PIONEX_SECRET_KEY = config.PIONEX_SECRET_KEY
 
 # Global variables
-SELECTED_SYMBOLS = []  # Dynamically updated via Telegram
-last_orders = {}  # Track last order side for each symbol
+SELECTED_SYMBOLS = []  # Persists until /reset_symbols
+last_orders = {}  # Track last order side for each symbol, persists until /reset_symbols
 
 # Pionex API Functions
 def generate_signature(method, path, params, body=None):
@@ -178,8 +178,17 @@ def place_market_order(symbol, side, amount_usdt=15.0):
     logger.error(f"Market {side} order failed for {pionex_symbol}: {response}")
     return None
 
+# Telegram Notification Function
+async def send_order_notification(bot, chat_id, symbol, side, price, order_id):
+    message = f"{side} order placed for {symbol} at {price:.2f} USDT (Order ID: {order_id})"
+    try:
+        await bot.send_message(chat_id=chat_id, text=message)
+        logger.info(f"Sent Telegram notification for {side} order on {symbol}")
+    except Exception as e:
+        logger.error(f"Failed to send Telegram notification for {symbol}: {e}")
+
 # Trading Logic
-def check_and_trade(symbol):
+def check_and_trade(symbol, bot, chat_id):
     try:
         # Fetch 1-day candle data
         daily_data = get_historical_data(symbol, '1d', limit=1)
@@ -208,6 +217,7 @@ def check_and_trade(symbol):
                 if order_id:
                     logger.info(f"Placed BUY order for {symbol} at {current_price}")
                     last_orders[symbol] = "BUY"
+                    asyncio.create_task(send_order_notification(bot, chat_id, symbol, "BUY", current_price, order_id))
                 else:
                     logger.error(f"Failed to place BUY order for {symbol}")
             else:
@@ -218,6 +228,7 @@ def check_and_trade(symbol):
                 if order_id:
                     logger.info(f"Placed SELL order for {symbol} at {current_price}")
                     last_orders[symbol] = "SELL"
+                    asyncio.create_task(send_order_notification(bot, chat_id, symbol, "SELL", current_price, order_id))
                 else:
                     logger.error(f"Failed to place SELL order for {symbol}")
             else:
@@ -228,7 +239,7 @@ def check_and_trade(symbol):
 
 # Telegram Command Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Trading bot started. Use /set_symbols <symbol1> <symbol2> ... to set trading symbols or /reset_symbols to clear them.")
+    await update.message.reply_text("Trading bot started. Use /set_symbols <symbol1> <symbol2> ... to add trading symbols or /reset_symbols to clear them.")
 
 async def set_symbols(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global SELECTED_SYMBOLS
@@ -238,35 +249,42 @@ async def set_symbols(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     new_symbols = []
     invalid_symbols = []
+    skipped_duplicates = []
     for symbol in context.args:
         symbol = symbol.upper()
+        if symbol in SELECTED_SYMBOLS:
+            skipped_duplicates.append(symbol)
+            continue
         if validate_symbol(symbol):  # Refreshes Pionex symbols on each validation
             new_symbols.append(symbol)
         else:
             invalid_symbols.append(symbol)
 
     if new_symbols:
-        SELECTED_SYMBOLS = new_symbols
-        last_orders.clear()  # Clear last orders when setting new symbols
-        await update.message.reply_text(f"Set trading symbols: {', '.join(SELECTED_SYMBOLS)}")
+        SELECTED_SYMBOLS.extend(new_symbols)
+        await update.message.reply_text(f"Added trading symbols: {', '.join(new_symbols)}. Current symbols: {', '.join(SELECTED_SYMBOLS)}")
     else:
-        await update.message.reply_text("No valid symbols provided.")
+        await update.message.reply_text("No new valid symbols provided.")
 
     if invalid_symbols:
         await update.message.reply_text(f"Invalid symbols: {', '.join(invalid_symbols)}")
+    if skipped_duplicates:
+        await update.message.reply_text(f"Skipped duplicate symbols: {', '.join(skipped_duplicates)}")
 
 async def reset_symbols(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global SELECTED_SYMBOLS
     SELECTED_SYMBOLS = []
-    last_orders.clear()  # Clear last orders when resetting symbols
+    last_orders.clear()  # Clear last orders only when resetting symbols
     await update.message.reply_text("Cleared all trading symbols and last orders. Trading stopped.")
 
 # Trading Loop
 async def run_trading_loop(application: Application):
+    bot = application.bot
+    chat_id = config.CHAT_ID  # Assumes CHAT_ID is defined in config
     while True:
         if SELECTED_SYMBOLS:
             for symbol in SELECTED_SYMBOLS:
-                check_and_trade(symbol)
+                check_and_trade(symbol, bot, chat_id)
             logger.info(f"Completed trading cycle for {SELECTED_SYMBOLS}")
         else:
             logger.info("No symbols selected, skipping trading cycle")
