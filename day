@@ -9,9 +9,13 @@ import json
 import logging
 from datetime import datetime
 import asyncio
+import nest_asyncio
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 import config  # Import the config module
+
+# Apply nest_asyncio to allow nested event loops
+nest_asyncio.apply()
 
 # Set up logging
 logger = logging.getLogger(__name__)
