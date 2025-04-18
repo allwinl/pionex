@@ -44,7 +44,8 @@ PIONEX_SECRET_KEY = config.PIONEX_SECRET_KEY
 
 # Global variables
 SELECTED_SYMBOLS = []  # Persists until /reset_symbols
-last_orders = {}  # Track last order side for each symbol, persists until /reset_symbols
+last_orders = {}  # Track last order side for each symbol
+buy_quantities = {}  # Track quantity purchased during buy orders
 
 # Pionex API Functions
 def generate_signature(method, path, params, body=None):
@@ -99,7 +100,7 @@ def fetch_pionex_symbols():
 
 # Validate symbol against Pionex symbols
 def validate_symbol(symbol):
-    valid_symbols = fetch_pionex_symbols()  # Always fetch fresh symbols
+    valid_symbols = fetch_pionex_symbols()
     return symbol.upper() in valid_symbols
 
 # Initialize Binance client
@@ -168,13 +169,30 @@ def place_market_order(symbol, side, amount_usdt=15.0):
     if side.upper() == "BUY":
         body["amount"] = f"{amount_usdt:.{quote_precision}f}"
     else:  # SELL
-        quantity = amount_usdt / best_bid
+        # Use stored buy quantity if available, else fallback to 14.95 USDT equivalent
+        if symbol in buy_quantities:
+            quantity = buy_quantities[symbol]
+            logger.info(f"Using stored buy quantity for {symbol}: {quantity}")
+        else:
+            quantity = 14.95 / best_bid  # Fallback to 14.95 USDT equivalent
+            logger.warning(f"No buy quantity found for {symbol}, using fallback: {quantity}")
         body["size"] = f"{quantity:.{base_precision}f}"
 
     response = api_request("POST", endpoint, params, body)
     if response and 'data' in response and response['result']:
-        logger.info(f"Market {side} order placed for {pionex_symbol}: {response['data']['orderId']}")
-        return response['data']['orderId']
+        order_id = response['data']['orderId']
+        logger.info(f"Market {side} order placed for {pionex_symbol}: {order_id}")
+        # Store buy quantity for future sell orders
+        if side.upper() == "BUY":
+            # Approximate quantity purchased (amount_usdt / price)
+            quantity = amount_usdt / best_ask
+            buy_quantities[symbol] = quantity
+            logger.info(f"Stored buy quantity for {symbol}: {quantity}")
+        elif side.upper() == "SELL":
+            # Clear buy quantity after selling
+            buy_quantities.pop(symbol, None)
+            logger.info(f"Cleared buy quantity for {symbol}")
+        return order_id
     logger.error(f"Market {side} order failed for {pionex_symbol}: {response}")
     return None
 
@@ -256,7 +274,7 @@ async def set_symbols(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if symbol in SELECTED_SYMBOLS:
             skipped_duplicates.append(symbol)
             continue
-        if validate_symbol(symbol):  # Refreshes Pionex symbols on each validation
+        if validate_symbol(symbol):
             new_symbols.append(symbol)
         else:
             invalid_symbols.append(symbol)
@@ -275,13 +293,14 @@ async def set_symbols(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def reset_symbols(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global SELECTED_SYMBOLS
     SELECTED_SYMBOLS = []
-    last_orders.clear()  # Clear last orders only when resetting symbols
-    await update.message.reply_text("Cleared all trading symbols and last orders. Trading stopped.")
+    last_orders.clear()
+    buy_quantities.clear()  # Clear buy quantities when resetting symbols
+    await update.message.reply_text("Cleared all trading symbols, last orders, and buy quantities. Trading stopped.")
 
 # Trading Loop
 async def run_trading_loop(application: Application):
     bot = application.bot
-    chat_id = config.CHAT_ID  # Assumes CHAT_ID is defined in config
+    chat_id = config.CHAT_ID
     while True:
         if SELECTED_SYMBOLS:
             for symbol in SELECTED_SYMBOLS:
