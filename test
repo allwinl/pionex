@@ -18,7 +18,7 @@ nest_asyncio.apply()
 
 # Set up logging
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO) 
+logger.setLevel(logging.INFO)
 
 file_handler = logging.FileHandler('trading_bot.log')
 file_handler.setLevel(logging.INFO)
@@ -47,7 +47,7 @@ buy_quantities = {}  # Track quantity purchased during buy orders
 
 # Pionex API Functions
 def generate_signature(method, path, params, body=None):
-    timestamp = str(int(time.time() * 1000))
+    timestamp = str(int(time.time() * 1000))  # Current time in milliseconds
     query_params = params.copy()
     query_params['timestamp'] = timestamp
     sorted_params = urlencode(sorted(query_params.items()), quote_via=lambda x, *_: x)
@@ -83,6 +83,8 @@ def api_request(method, endpoint, params=None, body=None):
         return response.json()
     except requests.exceptions.RequestException as e:
         logger.error(f"API request failed for {endpoint}: {e}")
+        if hasattr(e, 'response') and e.response:
+            logger.error(f"Response content: {e.response.text}")
         return None
 
 # Fetch valid symbols from Pionex
@@ -104,16 +106,20 @@ def validate_symbol(symbol):
 # Fetch historical data from Pionex
 def get_historical_data(symbol, interval, limit=1):
     try:
-        endpoint = "/api/v1/market/kline"
+        if not validate_symbol(symbol):
+            logger.error(f"Invalid symbol: {symbol}")
+            return None
+
+        endpoint = "/api/v1/market/klines"  # Updated to plural 'klines'
         pionex_symbol = symbol.replace("USDT", "_USDT")
         # Map interval to Pionex format
         interval_map = {
-            '1m': '1m',
-            '1d': '1d',
-            # Add more intervals if needed
+            '1m': '1M',
+            '1d': '1D',
+            # Add more intervals as needed: '5m': '5M', '15m': '15M', etc.
         }
         if interval not in interval_map:
-            logger.error(f"Unsupported interval: {interval}")
+            logger.error(f"Unsupported interval: {interval}. Supported: {list(interval_map.keys())}")
             return None
         pionex_interval = interval_map[interval]
         params = {
@@ -121,18 +127,27 @@ def get_historical_data(symbol, interval, limit=1):
             "interval": pionex_interval,
             "limit": limit
         }
+        # Optionally add endTime for precision
+        end_time = int(time.time() * 1000)  # Current time in milliseconds
+        params["endTime"] = end_time
+
         data = api_request("GET", endpoint, params)
         if not data or 'data' not in data or 'klines' not in data['data']:
-            logger.error(f"No historical data returned for {symbol}")
+            logger.error(f"No historical data returned for {symbol}. Response: {data}")
             return None
         
         # Convert kline data to DataFrame
         klines = data['data']['klines']
-        df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        if not klines:
+            logger.error(f"No kline data available for {symbol}")
+            return None
+        df = pd.DataFrame(klines, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
+        df = df.rename(columns={'time': 'timestamp'})
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
         df = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
         df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+        logger.info(f"Fetched historical data for {symbol} (interval: {interval}): {df}")
         return df
     except Exception as e:
         logger.error(f"Failed to fetch {interval} data for {symbol}: {e}")
@@ -322,7 +337,7 @@ async def run_trading_loop(application: Application):
             logger.info(f"Completed trading cycle for {SELECTED_SYMBOLS}")
         else:
             logger.info("No symbols selected, skipping trading cycle")
-        await asyncio.sleep(10)  # Run every minute
+        await asyncio.sleep(60)  # Run every minute
 
 # Main Function
 async def main():
