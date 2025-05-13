@@ -259,7 +259,7 @@ def check_and_trade(symbol, bot, chat_id):
         last_order_side = last_orders.get(symbol)
 
         # Trading logic
-        if current_price > daily_open and previous_price < daily_open:
+        if current_price > daily_open: # and previous_price < daily_open:
             if last_order_side != "BUY":
                 order_id = place_market_order(symbol, "BUY")
                 if order_id:
