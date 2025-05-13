@@ -18,7 +18,7 @@ nest_asyncio.apply()
 
 # Set up logging
 logger = logging.getLogger(__name__)
-logger.setLevel logging.INFO
+logger.setLevel(logging.INFO) 
 
 file_handler = logging.FileHandler('trading_bot.log')
 file_handler.setLevel(logging.INFO)
