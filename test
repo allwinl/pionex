@@ -337,7 +337,7 @@ async def run_trading_loop(application: Application):
             logger.info(f"Completed trading cycle for {SELECTED_SYMBOLS}")
         else:
             logger.info("No symbols selected, skipping trading cycle")
-        await asyncio.sleep(60)  # Run every minute
+        await asyncio.sleep(10)  # Run every minute
 
 # Main Function
 async def main():
