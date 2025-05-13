@@ -1,10 +1,343 @@
-# Save as test.py
-from telegram import Bot
+import requests
+import pandas as pd
+import time
+import hmac
+import hashlib
+from urllib.parse import urlencode
+import json
+import logging
+from datetime import datetime
+import asyncio
+import nest_asyncio
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
+import config  # Import the config module
 
-# Replace with your actual token and chat ID
-TELEGRAM_TOKEN = "7291265041:AAHAsg1hnD1fe4eINhfd-86425ReI04lYJY"
-CHAT_ID = "1385370555"
+# Apply nest_asyncio to allow nested event loops
+nest_asyncio.apply()
 
-bot = Bot(token=TELEGRAM_TOKEN)
-bot.send_message(chat_id=CHAT_ID, text="Test")
-print("Message sent successfully")
+# Set up logging
+logger = logging.getLogger(__name__)
+logger.setLevel logging.INFO)
+
+file_handler = logging.FileHandler('trading_bot.log')
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+logger.handlers.clear()
+logger.addHandler(file_handler)
+logger.addHandler(console_handler)
+
+# Suppress urllib3 noise
+logging.getLogger('urllib3').setLevel(logging.WARNING)
+
+# Pionex API setup
+BASE_URL = "https://api.pionex.com"
+PIONEX_API_KEY = config.PIONEX_API_KEY
+PIONEX_SECRET_KEY = config.PIONEX_SECRET_KEY
+
+# Global variables
+SELECTED_SYMBOLS = []  # Persists until /reset_symbols
+last_orders = {}  # Track last order side for each symbol
+buy_quantities = {}  # Track quantity purchased during buy orders
+
+# Pionex API Functions
+def generate_signature(method, path, params, body=None):
+    timestamp = str(int(time.time() * 1000))
+    query_params = params.copy()
+    query_params['timestamp'] = timestamp
+    sorted_params = urlencode(sorted(query_params.items()), quote_via=lambda x, *_: x)
+    path_url = f"{path}?{sorted_params}"
+    string_to_sign = f"{method.upper()}{path_url}"
+    if body:
+        body_str = json.dumps(body, separators=(',', ':'))
+        string_to_sign += body_str
+    signature = hmac.new(
+        PIONEX_SECRET_KEY.encode('utf-8'),
+        string_to_sign.encode('utf-8'),
+        hashlib.sha256
+    ).hexdigest()
+    return signature, timestamp
+
+def api_request(method, endpoint, params=None, body=None):
+    if params is None:
+        params = {}
+    signature, timestamp = generate_signature(method, endpoint, params, body)
+    params['timestamp'] = timestamp
+    url = f"{BASE_URL}{endpoint}"
+    headers = {
+        "PIONEX-KEY": PIONEX_API_KEY,
+        "PIONEX-SIGNATURE": signature,
+        "Content-Type": "application/json"
+    }
+    try:
+        if method == "GET":
+            response = requests.get(url, headers=headers, params=params)
+        elif method == "POST":
+            response = requests.post(url, headers=headers, params=params, data=json.dumps(body, separators=(',', ':')))
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        logger.error(f"API request failed for {endpoint}: {e}")
+        return None
+
+# Fetch valid symbols from Pionex
+def fetch_pionex_symbols():
+    endpoint = "/api/v1/common/symbols"
+    params = {}
+    data = api_request("GET", endpoint, params)
+    if data and 'data' in data and 'symbols' in data['data']:
+        return [s['symbol'].replace("_USDT", "USDT") for s in data['data']['symbols'] 
+                if s['quoteCurrency'] == 'USDT' and s['enable']]
+    logger.error("Failed to fetch symbols from Pionex")
+    return []
+
+# Validate symbol against Pionex symbols
+def validate_symbol(symbol):
+    valid_symbols = fetch_pionex_symbols()
+    return symbol.upper() in valid_symbols
+
+# Fetch historical data from Pionex
+def get_historical_data(symbol, interval, limit=1):
+    try:
+        endpoint = "/api/v1/market/kline"
+        pionex_symbol = symbol.replace("USDT", "_USDT")
+        # Map interval to Pionex format
+        interval_map = {
+            '1m': '1m',
+            '1d': '1d',
+            # Add more intervals if needed
+        }
+        if interval not in interval_map:
+            logger.error(f"Unsupported interval: {interval}")
+            return None
+        pionex_interval = interval_map[interval]
+        params = {
+            "symbol": pionex_symbol,
+            "interval": pionex_interval,
+            "limit": limit
+        }
+        data = api_request("GET", endpoint, params)
+        if not data or 'data' not in data or 'klines' not in data['data']:
+            logger.error(f"No historical data returned for {symbol}")
+            return None
+        
+        # Convert kline data to DataFrame
+        klines = data['data']['klines']
+        df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        df = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
+        df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+        return df
+    except Exception as e:
+        logger.error(f"Failed to fetch {interval} data for {symbol}: {e}")
+        return None
+
+# Pionex Trading Functions
+def get_symbol_info(symbol):
+    endpoint = "/api/v1/common/symbols"
+    pionex_symbol = symbol.replace("USDT", "_USDT")
+    params = {"symbols": pionex_symbol}
+    data = api_request("GET", endpoint, params)
+    if data and 'data' in data and 'symbols' in data['data'] and data['data']['symbols']:
+        return data['data']['symbols'][0]
+    logger.error(f"Failed to fetch symbol info for {pionex_symbol}")
+    return None
+
+def get_current_price(symbol):
+    endpoint = "/api/v1/market/depth"
+    pionex_symbol = symbol.replace("USDT", "_USDT")
+    params = {"symbol": pionex_symbol}
+    data = api_request("GET", endpoint, params)
+    if data and 'data' in data and 'bids' in data['data'] and 'asks' in data['data']:
+        best_bid = float(data['data']['bids'][0][0])
+        best_ask = float(data['data']['asks'][0][0])
+        return best_bid, best_ask
+    logger.error(f"Failed to fetch price for {pionex_symbol}")
+    return None, None
+
+def place_market_order(symbol, side, amount_usdt=15.0):
+    endpoint = "/api/v1/trade/order"
+    params = {}
+    symbol_info = get_symbol_info(symbol)
+    if not symbol_info:
+        return None
+    pionex_symbol = symbol.replace("USDT", "_USDT")
+    best_bid, best_ask = get_current_price(symbol)
+    if not best_bid or not best_ask:
+        return None
+    quote_precision = int(symbol_info['quotePrecision'])
+    base_precision = int(symbol_info['basePrecision'])
+    min_amount = float(symbol_info['minAmount'])
+    amount_usdt = max(amount_usdt, min_amount)
+    body = {
+        "symbol": pionex_symbol,
+        "side": side.upper(),
+        "type": "MARKET",
+    }
+    if side.upper() == "BUY":
+        body["amount"] = f"{amount_usdt:.{quote_precision}f}"
+    else:  # SELL
+        # Use stored buy quantity if available, else fallback to 14.95 USDT equivalent
+        if symbol in buy_quantities:
+            quantity = buy_quantities[symbol]
+            logger.info(f"Using stored buy quantity for {symbol}: {quantity}")
+        else:
+            quantity = 14.95 / best_bid  # Fallback to 14.95 USDT equivalent
+            logger.warning(f"No buy quantity found for {symbol}, using fallback: {quantity}")
+        body["size"] = f"{quantity:.{base_precision}f}"
+
+    response = api_request("POST", endpoint, params, body)
+    if response and 'data' in response and response['result']:
+        order_id = response['data']['orderId']
+        logger.info(f"Market {side} order placed for {pionex_symbol}: {order_id}")
+        # Store buy quantity for future sell orders
+        if side.upper() == "BUY":
+            # Approximate quantity purchased (amount_usdt / price)
+            quantity = amount_usdt / best_ask
+            buy_quantities[symbol] = quantity
+            logger.info(f"Stored buy quantity for {symbol}: {quantity}")
+        elif side.upper() == "SELL":
+            # Clear buy quantity after selling
+            buy_quantities.pop(symbol, None)
+            logger.info(f"Cleared buy quantity for {symbol}")
+        return order_id
+    logger.error(f"Market {side} order failed for {pionex_symbol}: {response}")
+    return None
+
+# Telegram Notification Function
+async def send_order_notification(bot, chat_id, symbol, side, price, order_id):
+    message = f"{side} order placed for {symbol} at {price:.2f} USDT (Order ID: {order_id})"
+    try:
+        await bot.send_message(chat_id=chat_id, text=message)
+        logger.info(f"Sent Telegram notification for {side} order on {symbol}")
+    except Exception as e:
+        logger.error(f"Failed to send Telegram notification for {symbol}: {e}")
+
+# Trading Logic
+def check_and_trade(symbol, bot, chat_id):
+    try:
+        # Fetch 1-day candle data
+        daily_data = get_historical_data(symbol, '1d', limit=1)
+        if daily_data is None or daily_data.empty:
+            logger.error(f"No daily data for {symbol}")
+            return
+
+        # Fetch 1-minute candle data
+        minute_data = get_historical_data(symbol, '1m', limit=5)
+        if minute_data is None or minute_data.empty:
+            logger.error(f"No 1-minute data for {symbol}")
+            return
+
+        daily_open = daily_data['Open'].iloc[-1]
+        current_price = minute_data['Close'].iloc[-1]
+        previous_price = minute_data['Close'].iloc[-2]
+
+        logger.info(f"{symbol} - Daily Open: {daily_open}, Current 1m Price: {current_price}")
+
+        # Get last order side for this symbol
+        last_order_side = last_orders.get(symbol)
+
+        # Trading logic
+        if current_price > daily_open and previous_price < daily_open:
+            if last_order_side != "BUY":
+                order_id = place_market_order(symbol, "BUY")
+                if order_id:
+                    logger.info(f"Placed BUY order for {symbol} at {current_price}")
+                    last_orders[symbol] = "BUY"
+                    asyncio.create_task(send_order_notification(bot, chat_id, symbol, "BUY", current_price, order_id))
+                else:
+                    logger.error(f"Failed to place BUY order for {symbol}")
+            else:
+                logger.info(f"Skipped BUY order for {symbol}: Already in BUY position")
+        elif current_price < daily_open:
+            if last_order_side != "SELL":
+                order_id = place_market_order(symbol, "SELL")
+                if order_id:
+                    logger.info(f"Placed SELL order for {symbol} at {current_price}")
+                    last_orders[symbol] = "SELL"
+                    asyncio.create_task(send_order_notification(bot, chat_id, symbol, "SELL", current_price, order_id))
+                else:
+                    logger.error(f"Failed to place SELL order for {symbol}")
+            else:
+                logger.info(f"Skipped SELL order for {symbol}: Already in SELL position")
+
+    except Exception as e:
+        logger.error(f"Error processing {symbol}: {e}")
+
+# Telegram Command Handlers
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Trading bot started. Use /set_symbols <symbol1> <symbol2> ... to add trading symbols or /reset_symbols to clear them.")
+
+async def set_symbols(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global SELECTED_SYMBOLS
+    if not context.args:
+        await update.message.reply_text("Please provide at least one symbol, e.g., /set_symbols BTCUSDT ETHUSDT")
+        return
+
+    new_symbols = []
+    invalid_symbols = []
+    skipped_duplicates = []
+    for symbol in context.args:
+        symbol = symbol.upper()
+        if symbol in SELECTED_SYMBOLS:
+            skipped_duplicates.append(symbol)
+            continue
+        if validate_symbol(symbol):
+            new_symbols.append(symbol)
+        else:
+            invalid_symbols.append(symbol)
+
+    if new_symbols:
+        SELECTED_SYMBOLS.extend(new_symbols)
+        await update.message.reply_text(f"Added trading symbols: {', '.join(new_symbols)}. Current symbols: {', '.join(SELECTED_SYMBOLS)}")
+    else:
+        await update.message.reply_text("No new valid symbols provided.")
+
+    if invalid_symbols:
+        await update.message.reply_text(f"Invalid symbols: {', '.join(invalid_symbols)}")
+    if skipped_duplicates:
+        await update.message.reply_text(f"Skipped duplicate symbols: {', '.join(skipped_duplicates)}")
+
+async def reset_symbols(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global SELECTED_SYMBOLS
+    SELECTED_SYMBOLS = []
+    last_orders.clear()
+    buy_quantities.clear()  # Clear buy quantities when resetting symbols
+    await update.message.reply_text("Cleared all trading symbols, last orders, and buy quantities. Trading stopped.")
+
+# Trading Loop
+async def run_trading_loop(application: Application):
+    bot = application.bot
+    chat_id = config.CHAT_ID
+    while True:
+        if SELECTED_SYMBOLS:
+            for symbol in SELECTED_SYMBOLS:
+                check_and_trade(symbol, bot, chat_id)
+            logger.info(f"Completed trading cycle for {SELECTED_SYMBOLS}")
+        else:
+            logger.info("No symbols selected, skipping trading cycle")
+        await asyncio.sleep(10)  # Run every minute
+
+# Main Function
+async def main():
+    application = Application.builder().token(config.TELEGRAM_TOKEN).build()
+
+    # Add command handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("set_symbols", set_symbols))
+    application.add_handler(CommandHandler("reset_symbols", reset_symbols))
+
+    # Start trading loop
+    asyncio.create_task(run_trading_loop(application))
+
+    # Start the bot
+    await application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == '__main__':
+    asyncio.run(main())
