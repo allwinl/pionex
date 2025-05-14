@@ -43,7 +43,6 @@ PIONEX_SECRET_KEY = config.PIONEX_SECRET_KEY
 # Global variables
 SELECTED_SYMBOLS = []  # Persists until /reset_symbols
 last_orders = {}  # Track last order side for each symbol
-buy_quantities = {}  # Track quantity purchased during buy orders
 
 # Pionex API Functions
 def generate_signature(method, path, params, body=None):
@@ -87,6 +86,23 @@ def api_request(method, endpoint, params=None, body=None):
             logger.error(f"Response content: {e.response.text}")
         return None
 
+# Fetch account balance
+def get_account_balance(symbol):
+    endpoint = "/api/v1/account/balances"
+    params = {}
+    data = api_request("GET", endpoint, params)
+    if data and 'data' in data and 'balances' in data['data']:
+        base_asset = symbol.replace("USDT", "")
+        for balance in data['data']['balances']:
+            if balance['coin'] == base_asset:
+                available = float(balance['available'])
+                logger.info(f"Available balance for {base_asset}: {available}")
+                return available
+        logger.warning(f"No balance found for {base_asset}")
+        return 0.0
+    logger.error(f"Failed to fetch account balance for {symbol}")
+    return 0.0
+
 # Fetch valid symbols from Pionex
 def fetch_pionex_symbols():
     endpoint = "/api/v1/common/symbols"
@@ -110,13 +126,11 @@ def get_historical_data(symbol, interval, limit=1):
             logger.error(f"Invalid symbol: {symbol}")
             return None
 
-        endpoint = "/api/v1/market/klines"  # Updated to plural 'klines'
+        endpoint = "/api/v1/market/klines"
         pionex_symbol = symbol.replace("USDT", "_USDT")
-        # Map interval to Pionex format
         interval_map = {
             '1m': '1M',
             '1d': '1D',
-            # Add more intervals as needed: '5m': '5M', '15m': '15M', etc.
         }
         if interval not in interval_map:
             logger.error(f"Unsupported interval: {interval}. Supported: {list(interval_map.keys())}")
@@ -127,16 +141,14 @@ def get_historical_data(symbol, interval, limit=1):
             "interval": pionex_interval,
             "limit": limit
         }
-        # Optionally add endTime for precision
-        end_time = int(time.time() * 1000)  # Current time in milliseconds
+        end_time = int(time.time() * 1000)
         params["endTime"] = end_time
 
         data = api_request("GET", endpoint, params)
-        if not data or 'data' not in data or 'klines' not in data['data']:
+        if not data or 'data' not in data or 'klines' in data['data']:
             logger.error(f"No historical data returned for {symbol}. Response: {data}")
             return None
         
-        # Convert kline data to DataFrame
         klines = data['data']['klines']
         if not klines:
             logger.error(f"No kline data available for {symbol}")
@@ -198,29 +210,23 @@ def place_market_order(symbol, side, amount_usdt=15.0):
     if side.upper() == "BUY":
         body["amount"] = f"{amount_usdt:.{quote_precision}f}"
     else:  # SELL
-        # Use stored buy quantity if available, else fallback to 14.95 USDT equivalent
-        if symbol in buy_quantities:
-            quantity = buy_quantities[symbol]
-            logger.info(f"Using stored buy quantity for {symbol}: {quantity}")
-        else:
-            quantity = 14.95 / best_bid  # Fallback to 14.95 USDT equivalent
-            logger.warning(f"No buy quantity found for {symbol}, using fallback: {quantity}")
-        body["size"] = f"{quantity:.{base_precision}f}"
+        # Fetch available balance for the base asset
+        available_quantity = get_account_balance(symbol)
+        if available_quantity <= 0:
+            logger.error(f"No available balance to sell for {symbol}")
+            return None
+        # Ensure quantity meets minimum trade requirements
+        min_quantity = min_amount / best_bid
+        if available_quantity < min_quantity:
+            logger.warning(f"Available quantity {available_quantity} for {symbol} is below minimum {min_quantity}")
+            return None
+        body["size"] = f"{available_quantity:.{base_precision}f}"
+        logger.info(f"Selling available quantity for {symbol}: {available_quantity}")
 
     response = api_request("POST", endpoint, params, body)
     if response and 'data' in response and response['result']:
         order_id = response['data']['orderId']
         logger.info(f"Market {side} order placed for {pionex_symbol}: {order_id}")
-        # Store buy quantity for future sell orders
-        if side.upper() == "BUY":
-            # Approximate quantity purchased (amount_usdt / price)
-            quantity = amount_usdt / best_ask
-            buy_quantities[symbol] = quantity
-            logger.info(f"Stored buy quantity for {symbol}: {quantity}")
-        elif side.upper() == "SELL":
-            # Clear buy quantity after selling
-            buy_quantities.pop(symbol, None)
-            logger.info(f"Cleared buy quantity for {symbol}")
         return order_id
     logger.error(f"Market {side} order failed for {pionex_symbol}: {response}")
     return None
@@ -237,13 +243,11 @@ async def send_order_notification(bot, chat_id, symbol, side, price, order_id):
 # Trading Logic
 def check_and_trade(symbol, bot, chat_id):
     try:
-        # Fetch 1-day candle data
         daily_data = get_historical_data(symbol, '1d', limit=1)
         if daily_data is None or daily_data.empty:
             logger.error(f"No daily data for {symbol}")
             return
 
-        # Fetch 1-minute candle data
         minute_data = get_historical_data(symbol, '1m', limit=5)
         if minute_data is None or minute_data.empty:
             logger.error(f"No 1-minute data for {symbol}")
@@ -255,11 +259,9 @@ def check_and_trade(symbol, bot, chat_id):
 
         logger.info(f"{symbol} - Daily Open: {daily_open}, Current 1m Price: {current_price}")
 
-        # Get last order side for this symbol
         last_order_side = last_orders.get(symbol)
 
-        # Trading logic
-        if current_price > daily_open: # and previous_price < daily_open:
+        if current_price > daily_open:
             if last_order_side != "BUY":
                 order_id = place_market_order(symbol, "BUY")
                 if order_id:
@@ -323,8 +325,7 @@ async def reset_symbols(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global SELECTED_SYMBOLS
     SELECTED_SYMBOLS = []
     last_orders.clear()
-    buy_quantities.clear()  # Clear buy quantities when resetting symbols
-    await update.message.reply_text("Cleared all trading symbols, last orders, and buy quantities. Trading stopped.")
+    await update.message.reply_text("Cleared all trading symbols and last orders. Trading stopped.")
 
 # Trading Loop
 async def run_trading_loop(application: Application):
@@ -343,15 +344,12 @@ async def run_trading_loop(application: Application):
 async def main():
     application = Application.builder().token(config.TELEGRAM_TOKEN).build()
 
-    # Add command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("set_symbols", set_symbols))
     application.add_handler(CommandHandler("reset_symbols", reset_symbols))
 
-    # Start trading loop
     asyncio.create_task(run_trading_loop(application))
 
-    # Start the bot
     await application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
