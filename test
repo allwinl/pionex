@@ -138,7 +138,6 @@ def get_historical_data(symbol, interval, limit=1):
             logger.error(f"No kline data available for {symbol}. Response: {data}")
             return None
 
-        # Convert kline data to DataFrame
         df = pd.DataFrame(klines, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
         df = df.rename(columns={'time': 'timestamp'})
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -159,8 +158,8 @@ def get_available_balance(symbol):
     if data and 'data' in data and 'balances' in data['data']:
         base_asset = symbol.replace("USDT", "")  # e.g., BTC from BTCUSDT
         for balance in data['data']['balances']:
-            if balance['asset'] == base_asset:
-                available = float(balance['available'])
+            if balance['coin'] == base_asset:  # Use 'coin' instead of 'asset'
+                available = float(balance['free'])  # Use 'free' for available balance
                 logger.info(f"Available balance for {base_asset}: {available}")
                 return available
         logger.warning(f"No balance found for {base_asset}")
@@ -257,7 +256,7 @@ def check_and_trade(symbol, bot, chat_id):
             return
 
         minute_data = get_historical_data(symbol, '1m', limit=5)
-        if minute_data is None or minute_data.empty:
+        if minute_data is None or daily_data.empty:
             logger.error(f"No 1-minute data for {symbol}")
             return
 
@@ -294,6 +293,7 @@ def check_and_trade(symbol, bot, chat_id):
 
     except Exception as e:
         logger.error(f"Error processing {symbol}: {e}")
+        return  # Ensure we exit the function on error to prevent partial processing
 
 # Telegram Command Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
