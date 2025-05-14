@@ -43,6 +43,7 @@ PIONEX_SECRET_KEY = config.PIONEX_SECRET_KEY
 # Global variables
 SELECTED_SYMBOLS = []  # Persists until /reset_symbols
 last_orders = {}  # Track last order side for each symbol
+buy_quantities = {}  # Track quantity purchased during buy orders
 
 # Pionex API Functions
 def generate_signature(method, path, params, body=None):
@@ -86,23 +87,6 @@ def api_request(method, endpoint, params=None, body=None):
             logger.error(f"Response content: {e.response.text}")
         return None
 
-# Fetch account balance
-def get_account_balance(symbol):
-    endpoint = "/api/v1/account/balances"
-    params = {}
-    data = api_request("GET", endpoint, params)
-    if data and 'data' in data and 'balances' in data['data']:
-        base_asset = symbol.replace("USDT", "")
-        for balance in data['data']['balances']:
-            if balance['coin'] == base_asset:
-                available = float(balance['available'])
-                logger.info(f"Available balance for {base_asset}: {available}")
-                return available
-        logger.warning(f"No balance found for {base_asset}")
-        return 0.0
-    logger.error(f"Failed to fetch account balance for {symbol}")
-    return 0.0
-
 # Fetch valid symbols from Pionex
 def fetch_pionex_symbols():
     endpoint = "/api/v1/common/symbols"
@@ -145,7 +129,7 @@ def get_historical_data(symbol, interval, limit=1):
         params["endTime"] = end_time
 
         data = api_request("GET", endpoint, params)
-        if not data or 'data' not in data or 'klines' not in data['data']:
+        if not data or 'data' not in data or 'klines' in data['data']:
             logger.error(f"No historical data returned for {symbol}. Response: {data}")
             return None
         
@@ -153,7 +137,6 @@ def get_historical_data(symbol, interval, limit=1):
         if not klines:
             logger.error(f"No kline data available for {symbol}")
             return None
-        
         df = pd.DataFrame(klines, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
         df = df.rename(columns={'time': 'timestamp'})
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -165,6 +148,23 @@ def get_historical_data(symbol, interval, limit=1):
     except Exception as e:
         logger.error(f"Failed to fetch {interval} data for {symbol}: {e}")
         return None
+
+# Fetch available balance for a specific asset
+def get_available_balance(symbol):
+    endpoint = "/api/v1/account/balances"
+    params = {}
+    data = api_request("GET", endpoint, params)
+    if data and 'data' in data and 'balances' in data['data']:
+        base_asset = symbol.replace("USDT", "")  # e.g., BTC from BTCUSDT
+        for balance in data['data']['balances']:
+            if balance['asset'] == base_asset:
+                available = float(balance['available'])
+                logger.info(f"Available balance for {base_asset}: {available}")
+                return available
+        logger.warning(f"No balance found for {base_asset}")
+        return 0.0
+    logger.error(f"Failed to fetch balance for {symbol}")
+    return 0.0
 
 # Pionex Trading Functions
 def get_symbol_info(symbol):
@@ -211,21 +211,31 @@ def place_market_order(symbol, side, amount_usdt=15.0):
     if side.upper() == "BUY":
         body["amount"] = f"{amount_usdt:.{quote_precision}f}"
     else:  # SELL
-        available_quantity = get_account_balance(symbol)
+        # Fetch available balance for the base asset
+        available_quantity = get_available_balance(symbol)
         if available_quantity <= 0:
             logger.error(f"No available balance to sell for {symbol}")
             return None
+        # Ensure quantity meets minimum trade requirements
         min_quantity = min_amount / best_bid
         if available_quantity < min_quantity:
-            logger.warning(f"Available quantity {available_quantity} for {symbol} is below minimum {min_quantity}")
+            logger.error(f"Available quantity {available_quantity} for {symbol} is below minimum {min_quantity}")
             return None
         body["size"] = f"{available_quantity:.{base_precision}f}"
-        logger.info(f"Selling available quantity for {symbol}: {availableHer_quantity}")
+        logger.info(f"Selling entire available quantity for {symbol}: {available_quantity}")
 
     response = api_request("POST", endpoint, params, body)
     if response and 'data' in response and response['result']:
         order_id = response['data']['orderId']
         logger.info(f"Market {side} order placed for {pionex_symbol}: {order_id}")
+        # Store buy quantity for tracking (optional, kept for consistency)
+        if side.upper() == "BUY":
+            quantity = amount_usdt / best_ask
+            buy_quantities[symbol] = quantity
+            logger.info(f"Stored buy quantity for {symbol}: {quantity}")
+        elif side.upper() == "SELL":
+            buy_quantities.pop(symbol, None)
+            logger.info(f"Cleared buy quantity for {symbol}")
         return order_id
     logger.error(f"Market {side} order failed for {pionex_symbol}: {response}")
     return None
@@ -324,7 +334,8 @@ async def reset_symbols(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global SELECTED_SYMBOLS
     SELECTED_SYMBOLS = []
     last_orders.clear()
-    await update.message.reply_text("Cleared all trading symbols and last orders. Trading stopped.")
+    buy_quantities.clear()
+    await update.message.reply_text("Cleared all trading symbols, last orders, and buy quantities. Trading stopped.")
 
 # Trading Loop
 async def run_trading_loop(application: Application):
@@ -337,7 +348,7 @@ async def run_trading_loop(application: Application):
             logger.info(f"Completed trading cycle for {SELECTED_SYMBOLS}")
         else:
             logger.info("No symbols selected, skipping trading cycle")
-        await asyncio.sleep(10)  # Run every minute
+        await asyncio.sleep(10)
 
 # Main Function
 async def main():
