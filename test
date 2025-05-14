@@ -129,14 +129,16 @@ def get_historical_data(symbol, interval, limit=1):
         params["endTime"] = end_time
 
         data = api_request("GET", endpoint, params)
-        if not data or 'data' not in data or 'klines' in data['data']:
+        if not data or 'data' not in data:
             logger.error(f"No historical data returned for {symbol}. Response: {data}")
             return None
         
-        klines = data['data']['klines']
+        klines = data['data'].get('klines', [])
         if not klines:
-            logger.error(f"No kline data available for {symbol}")
+            logger.error(f"No kline data available for {symbol}. Response: {data}")
             return None
+
+        # Convert kline data to DataFrame
         df = pd.DataFrame(klines, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
         df = df.rename(columns={'time': 'timestamp'})
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -211,12 +213,10 @@ def place_market_order(symbol, side, amount_usdt=15.0):
     if side.upper() == "BUY":
         body["amount"] = f"{amount_usdt:.{quote_precision}f}"
     else:  # SELL
-        # Fetch available balance for the base asset
         available_quantity = get_available_balance(symbol)
         if available_quantity <= 0:
             logger.error(f"No available balance to sell for {symbol}")
             return None
-        # Ensure quantity meets minimum trade requirements
         min_quantity = min_amount / best_bid
         if available_quantity < min_quantity:
             logger.error(f"Available quantity {available_quantity} for {symbol} is below minimum {min_quantity}")
@@ -228,7 +228,6 @@ def place_market_order(symbol, side, amount_usdt=15.0):
     if response and 'data' in response and response['result']:
         order_id = response['data']['orderId']
         logger.info(f"Market {side} order placed for {pionex_symbol}: {order_id}")
-        # Store buy quantity for tracking (optional, kept for consistency)
         if side.upper() == "BUY":
             quantity = amount_usdt / best_ask
             buy_quantities[symbol] = quantity
