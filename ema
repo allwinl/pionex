@@ -106,7 +106,7 @@ def fetch_pionex_symbols():
     return []
 
 # Fetch historical OHLCV data from Pionex
-def get_historical_data(symbol, interval='15M', limit=201):
+def get_historical_data(symbol, interval='15M', limit=250):
     try:
         if interval not in VALID_INTERVALS:
             logger.error(f"Invalid interval {interval} for {symbol}. Valid intervals: {VALID_INTERVALS}")
@@ -140,8 +140,8 @@ def get_historical_data(symbol, interval='15M', limit=201):
 # Calculate EMAs
 def calculate_emas(df):
     try:
-        df['EMA9'] = ta.trend.ema_indicator(df['Close'], window=9)
-        df['EMA200'] = ta.trend.ema_indicator(df['Close'], window=200)
+        df['EMA9'] = ta.trend.ema_indicator(df['Close'], window=1)
+        df['EMA200'] = ta.trend.ema_indicator(df['Close'], window=10)
         return df
     except Exception as e:
         logger.error(f"Failed to calculate EMAs: {e}")
@@ -334,7 +334,7 @@ async def run_trading_loop():
             valid_symbols = []
             for symbol in SELECTED_SYMBOLS:
                 # Check if symbol has sufficient data
-                data = get_historical_data(symbol, '15M', limit=201)
+                data = get_historical_data(symbol, '15M', limit=250)
                 if data is not None and not data.empty:
                     valid_symbols.append(symbol)
                     await check_and_trade(symbol)
@@ -342,7 +342,7 @@ async def run_trading_loop():
             logger.info(f"Completed trading cycle for {len(valid_symbols)} valid symbols")
         else:
             logger.info("No symbols selected, skipping trading cycle")
-        await asyncio.sleep(60)  # Run every minute
+        await asyncio.sleep(300)  # Run every minute
 
 # Main Function
 async def main():
