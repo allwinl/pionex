@@ -11,7 +11,6 @@ import asyncio
 import nest_asyncio
 import ta
 from telegram import Bot
-import config 
 
 # Apply nest_asyncio to allow nested event loops
 nest_asyncio.apply()
@@ -46,30 +45,18 @@ TELEGRAM_TOKEN = config.TELEGRAM_TOKEN
 CHAT_ID = config.CHAT_ID
 
 # Global variables
-SELECTED_SYMBOLS = []  # Will be populated with Binance spot USDT pairs
+SELECTED_SYMBOLS = []  # Will be populated with valid USDT pairs
 last_orders = {}  # Track last order side for each symbol
 buy_quantities = {}  # Track quantity purchased during buy orders
 order_history = {}  # Track order IDs for each symbol
 
-# Initialize Binance client for spot market data
+# Initialize Binance client for spot market
 binance = ccxt.binance({
     'apiKey': config.BINANCE_API_KEY,
     'secret': config.BINANCE_API_SECRET,
     'enableRateLimit': True,
-    'options': {'defaultType': 'spot'}  # Changed to spot market
+    'options': {'defaultType': 'spot'}
 })
-
-# Fetch all USDT trading pairs from Binance spot
-def fetch_binance_spot_symbols():
-    try:
-        binance.load_markets()
-        symbols = [symbol for symbol, market in binance.markets.items() 
-                   if market['active'] and market['quote'] == 'USDT' and market['spot']]
-        logger.info(f"Fetched {len(symbols)} USDT trading pairs from Binance spot")
-        return symbols
-    except Exception as e:
-        logger.error(f"Failed to fetch Binance spot symbols: {e}")
-        return []
 
 # Pionex API Functions
 def generate_signature(method, path, params, body=None):
@@ -117,38 +104,24 @@ def fetch_pionex_symbols():
     params = {}
     data = api_request("GET", endpoint, params)
     if data and 'data' in data and 'symbols' in data['data']:
-        return [s['symbol'].replace("_USDT", "USDT") for s in data['data']['symbols'] 
-                if s['quoteCurrency'] == 'USDT' and s['enable']]
+        symbols = [s['symbol'].replace("_USDT", "USDT") for s in data['data']['symbols'] 
+                   if s['quoteCurrency'] == 'USDT' and s['enable']]
+        logger.info(f"Fetched {len(symbols)} USDT trading pairs from Pionex")
+        return symbols
     logger.error("Failed to fetch symbols from Pionex")
     return []
 
-# Validate symbol against Pionex symbols
-def validate_symbol(symbol):
-    valid_symbols = fetch_pionex_symbols()
-    return symbol.upper() in valid_symbols
-
-# Binance Data Functions
-def get_historical_data(symbol, interval, limit=250):
+# Validate symbol against Binance spot market
+def validate_binance_symbol(symbol):
     try:
-        ohlcv = binance.fetch_ohlcv(symbol, interval, limit=limit)
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df.set_index('timestamp', inplace=True)
-        df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
-        return df
+        binance.load_markets()
+        if symbol in binance.markets and binance.markets[symbol]['active'] and binance.markets[symbol]['spot']:
+            return True
+        logger.warning(f"Symbol {symbol} not valid or active on Binance spot")
+        return False
     except Exception as e:
-        logger.error(f"Failed to fetch {interval} data for {symbol}: {e}")
-        return None
-
-# Calculate EMAs
-def calculate_emas(df):
-    try:
-        df['EMA9'] = ta.trend.ema_indicator(df['Close'], window=9)
-        df['EMA200'] = ta.trend.ema_indicator(df['Close'], window=200)
-        return df
-    except Exception as e:
-        logger.error(f"Failed to calculate EMAs: {e}")
-        return None
+        logger.error(f"Error validating {symbol} on Binance: {e}")
+        return False
 
 # Pionex Trading Functions
 def get_symbol_info(symbol):
@@ -263,6 +236,29 @@ def place_market_order(symbol, side, amount_usdt=None, max_retries=5):
             asyncio.create_task(send_telegram_notification(symbol))
     return None
 
+# Binance Data Functions
+def get_historical_data(symbol, interval, limit=201):
+    try:
+        ohlcv = binance.fetch_ohlcv(symbol, interval, limit=limit)
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+        return df
+    except Exception as e:
+        logger.error(f"Failed to fetch {interval} data for {symbol}: {e}")
+        return None
+
+# Calculate EMAs
+def calculate_emas(df):
+    try:
+        df['EMA9'] = ta.trend.ema_indicator(df['Close'], window=9)
+        df['EMA200'] = ta.trend.ema_indicator(df['Close'], window=200)
+        return df
+    except Exception as e:
+        logger.error(f"Failed to calculate EMAs: {e}")
+        return None
+
 # Trading Logic
 async def check_and_trade(symbol):
     try:
@@ -344,14 +340,19 @@ async def run_trading_loop():
 
 # Main Function
 async def main():
-    # Fetch all Binance spot USDT pairs
+    # Fetch Pionex USDT pairs
     global SELECTED_SYMBOLS
-    binance_symbols = fetch_binance_spot_symbols()
-    # Validate against Pionex symbols
-    valid_symbols = [symbol for symbol in binance_symbols if validate_symbol(symbol)]
-    if not valid_symbols:
-        logger.error("No valid USDT trading pairs found on both Binance spot and Pionex. Exiting.")
+    pionex_symbols = fetch_pionex_symbols()
+    if not pionex_symbols:
+        logger.error("No USDT trading pairs found on Pionex. Exiting.")
         return
+
+    # Validate against Binance spot market
+    valid_symbols = [symbol for symbol in pionex_symbols if validate_binance_symbol(symbol)]
+    if not valid_symbols:
+        logger.error("No valid USDT trading pairs found on both Pionex and Binance spot. Exiting.")
+        return
+
     SELECTED_SYMBOLS = valid_symbols
     logger.info(f"Starting trading bot with {len(SELECTED_SYMBOLS)} symbols: {', '.join(SELECTED_SYMBOLS[:5])}...")
 
