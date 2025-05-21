@@ -10,6 +10,7 @@ import asyncio
 import nest_asyncio
 import ta
 from telegram import Bot
+import config
 
 # Apply nest_asyncio to allow nested event loops
 nest_asyncio.apply()
