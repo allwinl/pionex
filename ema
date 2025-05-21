@@ -275,10 +275,10 @@ async def check_and_trade(symbol):
             return
 
         # Get the latest and previous EMA values
-        ema9_current = data['EMA9'].iloc[-1]
-        ema200_current = data['EMA200'].iloc[-1]
-        ema9_previous = data['EMA9'].iloc[-2]
-        ema200_previous = data['EMA200'].iloc[-2]
+        ema9_current = data['EMA9'].iloc[-2]
+        ema200_current = data['EMA200'].iloc[-2]
+        ema9_previous = data['EMA9'].iloc[-3]
+        ema200_previous = data['EMA200'].iloc[-3]
 
         logger.info(f"{symbol} - EMA9: {ema9_current:.2f}, EMA200: {ema200_current:.2f}")
 
