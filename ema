@@ -128,7 +128,7 @@ def validate_symbol(symbol):
     return symbol.upper() in valid_symbols
 
 # Binance Data Functions
-def get_historical_data(symbol, interval, limit=200):
+def get_historical_data(symbol, interval, limit=250):
     try:
         ohlcv = binance.fetch_ohlcv(symbol, interval, limit=limit)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
