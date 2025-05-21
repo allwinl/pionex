@@ -1,4 +1,5 @@
 import requests
+import ccxt
 import pandas as pd
 import time
 import hmac
@@ -31,8 +32,9 @@ logger.handlers.clear()
 logger.addHandler(file_handler)
 logger.addHandler(console_handler)
 
-# Suppress urllib3 noise
+# Suppress urllib3 and ccxt noise
 logging.getLogger('urllib3').setLevel(logging.WARNING)
+logging.getLogger('ccxt').setLevel(logging.WARNING)
 
 # Pionex API setup
 BASE_URL = "https://api.pionex.com"
@@ -44,7 +46,7 @@ TELEGRAM_TOKEN = config.TELEGRAM_TOKEN
 CHAT_ID = config.CHAT_ID
 
 # Global variables
-SELECTED_SYMBOLS = ['BTC_USDT', 'ETH_USDT']  # Pionex format; modify as needed
+SELECTED_SYMBOLS = ['BTCUSDT', 'ETHUSDT']  # Example symbols; modify as needed
 last_orders = {}  # Track last order side for each symbol
 buy_quantities = {}  # Track quantity purchased during buy orders
 order_history = {}  # Track order IDs for each symbol
@@ -95,7 +97,7 @@ def fetch_pionex_symbols():
     params = {}
     data = api_request("GET", endpoint, params)
     if data and 'data' in data and 'symbols' in data['data']:
-        return [s['symbol'] for s in data['data']['symbols'] 
+        return [s['symbol'].replace("_USDT", "USDT") for s in data['data']['symbols'] 
                 if s['quoteCurrency'] == 'USDT' and s['enable']]
     logger.error("Failed to fetch symbols from Pionex")
     return []
@@ -105,26 +107,23 @@ def validate_symbol(symbol):
     valid_symbols = fetch_pionex_symbols()
     return symbol.upper() in valid_symbols
 
-# Pionex Data Functions
-def get_historical_data(symbol, interval='15m', limit=200):
-    endpoint = "/api/v1/market/kline"
-    params = {
-        "symbol": symbol,
-        "interval": interval,
-        "limit": limit
-    }
+# Initialize Binance client for market data
+binance = ccxt.binance({
+    'apiKey': config.BINANCE_API_KEY,
+    'secret': config.BINANCE_API_SECRET,
+    'enableRateLimit': True,
+    'options': {'defaultType': 'future'}
+})
+
+# Binance Data Functions
+def get_historical_data(symbol, interval, limit=200):
     try:
-        data = api_request("GET", Checkpoint, params)
-        if data and 'data' in data and 'klines' in data['data']:
-            klines = data['data']['klines']
-            df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            df.set_index('timestamp', inplace=True)
-            df = df.astype(float)
-            df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
-            return df
-        logger.error(f"No kline data returned for {symbol}")
-        return None
+        ohlcv = binance.fetch_ohlcv(symbol, interval, limit=limit)
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+        return df
     except Exception as e:
         logger.error(f"Failed to fetch {interval} data for {symbol}: {e}")
         return None
@@ -142,22 +141,24 @@ def calculate_emas(df):
 # Pionex Trading Functions
 def get_symbol_info(symbol):
     endpoint = "/api/v1/common/symbols"
-    params = {"symbols": symbol}
+    pionex_symbol = symbol.replace("USDT", "_USDT")
+    params = {"symbols": pionex_symbol}
     data = api_request("GET", endpoint, params)
     if data and 'data' in data and 'symbols' in data['data'] and data['data']['symbols']:
         return data['data']['symbols'][0]
-    logger.error(f"Failed to fetch symbol info for {symbol}")
+    logger.error(f"Failed to fetch symbol info for {pionex_symbol}")
     return None
 
 def get_current_price(symbol):
     endpoint = "/api/v1/market/depth"
-    params = {"symbol": symbol}
+    pionex_symbol = symbol.replace("USDT", "_USDT")
+    params = {"symbol": pionex_symbol}
     data = api_request("GET", endpoint, params)
     if data and 'data' in data and 'bids' in data['data'] and 'asks' in data['data']:
         best_bid = float(data['data']['bids'][0][0])
         best_ask = float(data['data']['asks'][0][0])
         return best_bid, best_ask
-    logger.error(f"Failed to fetch price for {symbol}")
+    logger.error(f"Failed to fetch price for {pionex_symbol}")
     return None, None
 
 def get_balance(symbol):
@@ -165,7 +166,7 @@ def get_balance(symbol):
     params = {}
     data = api_request("GET", endpoint, params)
     if data and 'data' in data and 'balances' in data['data']:
-        base_currency = symbol.replace("_USDT", "")
+        base_currency = symbol.replace("USDT", "")
         for balance in data['data']['balances']:
             if balance['coin'] == base_currency:
                 return float(balance['free'])
@@ -187,6 +188,7 @@ def place_market_order(symbol, side, amount_usdt=None, max_retries=5):
     symbol_info = get_symbol_info(symbol)
     if not symbol_info:
         return None
+    pionex_symbol = symbol.replace("USDT", "_USDT")
     best_bid, best_ask = get_current_price(symbol)
     if not best_bid or not best_ask:
         return None
@@ -194,7 +196,7 @@ def place_market_order(symbol, side, amount_usdt=None, max_retries=5):
     base_precision = int(symbol_info['basePrecision'])
     min_amount = float(symbol_info['minAmount'])
     body = {
-        "symbol": symbol,
+        "symbol": pionex_symbol,
         "side": side.upper(),
         "type": "MARKET",
     }
@@ -224,7 +226,7 @@ def place_market_order(symbol, side, amount_usdt=None, max_retries=5):
         if response and 'data' in response and response['result']:
             order_id = response['data']['orderId']
             if order_id != previous_order_id:
-                logger.info(f"Market {side} order placed for {symbol}: Order ID {order_id}")
+                logger.info(f"Market {side} order placed for {pionex_symbol}: Order ID {order_id}")
                 # Store order ID in history
                 if symbol not in order_history:
                     order_history[symbol] = []
@@ -239,7 +241,7 @@ def place_market_order(symbol, side, amount_usdt=None, max_retries=5):
                 return order_id
             else:
                 logger.error(f"Order ID {order_id} matches previous order ID, treating as failure")
-        logger.error(f"Market {side} order failed for {symbol}: {response}")
+        logger.error(f"Market {side} order failed for {pionex_symbol}: {response}")
         retries += 1
         if side.upper() == "SELL" and retries < max_retries:
             logger.info(f"Retrying SELL order for {symbol} (Attempt {retries + 1}/{max_retries})")
@@ -253,7 +255,7 @@ def place_market_order(symbol, side, amount_usdt=None, max_retries=5):
 async def check_and_trade(symbol):
     try:
         logger.info(f"Checking {symbol} - Last order: {last_orders.get(symbol, 'None')}")
-        # Fetch 15-minute candle data from Pionex
+        # Fetch 15-minute candle data
         data = get_historical_data(symbol, '15m', limit=201)
         if data is None or data.empty or len(data) < 200:
             logger.error(f"Insufficient 15m data for {symbol}")
