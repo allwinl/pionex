@@ -11,7 +11,7 @@ import asyncio
 import nest_asyncio
 import ta
 from telegram import Bot
-import config
+import config 
 
 # Apply nest_asyncio to allow nested event loops
 nest_asyncio.apply()
@@ -46,10 +46,30 @@ TELEGRAM_TOKEN = config.TELEGRAM_TOKEN
 CHAT_ID = config.CHAT_ID
 
 # Global variables
-SELECTED_SYMBOLS = ['BTCUSDT', 'ETHUSDT']  # Example symbols; modify as needed
+SELECTED_SYMBOLS = []  # Will be populated with Binance spot USDT pairs
 last_orders = {}  # Track last order side for each symbol
 buy_quantities = {}  # Track quantity purchased during buy orders
 order_history = {}  # Track order IDs for each symbol
+
+# Initialize Binance client for spot market data
+binance = ccxt.binance({
+    'apiKey': config.BINANCE_API_KEY,
+    'secret': config.BINANCE_API_SECRET,
+    'enableRateLimit': True,
+    'options': {'defaultType': 'spot'}  # Changed to spot market
+})
+
+# Fetch all USDT trading pairs from Binance spot
+def fetch_binance_spot_symbols():
+    try:
+        binance.load_markets()
+        symbols = [symbol for symbol, market in binance.markets.items() 
+                   if market['active'] and market['quote'] == 'USDT' and market['spot']]
+        logger.info(f"Fetched {len(symbols)} USDT trading pairs from Binance spot")
+        return symbols
+    except Exception as e:
+        logger.error(f"Failed to fetch Binance spot symbols: {e}")
+        return []
 
 # Pionex API Functions
 def generate_signature(method, path, params, body=None):
@@ -106,14 +126,6 @@ def fetch_pionex_symbols():
 def validate_symbol(symbol):
     valid_symbols = fetch_pionex_symbols()
     return symbol.upper() in valid_symbols
-
-# Initialize Binance client for market data
-binance = ccxt.binance({
-    'apiKey': config.BINANCE_API_KEY,
-    'secret': config.BINANCE_API_SECRET,
-    'enableRateLimit': True,
-    'options': {'defaultType': 'future'}
-})
 
 # Binance Data Functions
 def get_historical_data(symbol, interval, limit=200):
@@ -325,21 +337,23 @@ async def run_trading_loop():
         if SELECTED_SYMBOLS:
             for symbol in SELECTED_SYMBOLS:
                 await check_and_trade(symbol)
-            logger.info(f"Completed trading cycle for {SELECTED_SYMBOLS}")
+            logger.info(f"Completed trading cycle for {len(SELECTED_SYMBOLS)} symbols")
         else:
             logger.info("No symbols selected, skipping trading cycle")
         await asyncio.sleep(60)  # Run every minute
 
 # Main Function
 async def main():
-    # Validate selected symbols
+    # Fetch all Binance spot USDT pairs
     global SELECTED_SYMBOLS
-    valid_symbols = [s for s in SELECTED_SYMBOLS if validate_symbol(s)]
+    binance_symbols = fetch_binance_spot_symbols()
+    # Validate against Pionex symbols
+    valid_symbols = [symbol for symbol in binance_symbols if validate_symbol(symbol)]
     if not valid_symbols:
-        logger.error("No valid symbols provided. Exiting.")
+        logger.error("No valid USDT trading pairs found on both Binance spot and Pionex. Exiting.")
         return
     SELECTED_SYMBOLS = valid_symbols
-    logger.info(f"Starting trading bot with symbols: {SELECTED_SYMBOLS}")
+    logger.info(f"Starting trading bot with {len(SELECTED_SYMBOLS)} symbols: {', '.join(SELECTED_SYMBOLS[:5])}...")
 
     # Start trading loop
     await run_trading_loop()
