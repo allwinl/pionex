@@ -49,6 +49,9 @@ last_orders = {}  # Track last order side for each symbol
 buy_quantities = {}  # Track quantity purchased during buy orders
 order_history = {}  # Track order IDs for each symbol
 
+# Valid intervals for Pionex kline API
+VALID_INTERVALS = ['1M', '5M', '15M', '30M', '60M', '4H', '8H', '12H', '1D']
+
 # Pionex API Functions
 def generate_signature(method, path, params, body=None):
     timestamp = str(int(time.time() * 1000))
@@ -103,8 +106,11 @@ def fetch_pionex_symbols():
     return []
 
 # Fetch historical OHLCV data from Pionex
-def get_historical_data(symbol, interval='15m', limit=201):
+def get_historical_data(symbol, interval='15M', limit=201):
     try:
+        if interval not in VALID_INTERVALS:
+            logger.error(f"Invalid interval {interval} for {symbol}. Valid intervals: {VALID_INTERVALS}")
+            return None
         pionex_symbol = symbol.replace("USDT", "_USDT")
         endpoint = "/api/v1/market/klines"
         params = {
@@ -259,7 +265,7 @@ async def check_and_trade(symbol):
     try:
         logger.info(f"Checking {symbol} - Last order: {last_orders.get(symbol, 'None')}")
         # Fetch 15-minute candle data from Pionex
-        data = get_historical_data(symbol, '15m', limit=201)
+        data = get_historical_data(symbol, '15M', limit=201)
         if data is None or data.empty:
             return
 
@@ -328,7 +334,7 @@ async def run_trading_loop():
             valid_symbols = []
             for symbol in SELECTED_SYMBOLS:
                 # Check if symbol has sufficient data
-                data = get_historical_data(symbol, '15m', limit=201)
+                data = get_historical_data(symbol, '15M', limit=201)
                 if data is not None and not data.empty:
                     valid_symbols.append(symbol)
                     await check_and_trade(symbol)
