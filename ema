@@ -140,8 +140,8 @@ def get_historical_data(symbol, interval='15M', limit=250):
 # Calculate EMAs
 def calculate_emas(df):
     try:
-        df['EMA9'] = ta.trend.ema_indicator(df['Close'], window=1)
-        df['EMA200'] = ta.trend.ema_indicator(df['Close'], window=10)
+        df['EMA9'] = ta.trend.ema_indicator(df['Close'], window=9)
+        df['EMA200'] = ta.trend.ema_indicator(df['Close'], window=200)
         return df
     except Exception as e:
         logger.error(f"Failed to calculate EMAs: {e}")
