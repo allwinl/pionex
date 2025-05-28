@@ -46,8 +46,8 @@ CHAT_ID = config.CHAT_ID
 # Global variables
 SELECTED_SYMBOLS = []  # Will be populated with Pionex USDT pairs
 last_orders = {}  # Track last order side for each symbol
+buy_order_ids = {}  # Track buy order IDs for each symbol
 buy_quantities = {}  # Track quantity purchased during buy orders
-order_history = {}  # Track order IDs for each symbol
 
 # Valid intervals for Pionex kline API
 VALID_INTERVALS = ['1M', '5M', '15M', '30M', '60M', '4H', '8H', '12H', '1D']
@@ -139,9 +139,9 @@ def get_historical_data(symbol, interval='15M', limit=250):
 
 def calculate_emas(df):
     try:
-        # Calculate EMAs using ta library with 9 decimal places
-        df['EMA9'] = ta.trend.ema_indicator(df['Close'], window=9).round(9)
-        df['EMA200'] = ta.trend.ema_indicator(df['Close'], window=200).round(9)
+        # Calculate EMAs using ta library with 8 decimal places to match Pionex
+        df['EMA9'] = ta.trend.ema_indicator(df['Close'], window=9).round(8)
+        df['EMA200'] = ta.trend.ema_indicator(df['Close'], window=200).round(8)
         return df
     except Exception as e:
         logger.error(f"Failed to calculate EMAs: {e}")
@@ -178,14 +178,16 @@ def get_balance(symbol):
         base_currency = symbol.replace("USDT", "")
         for balance in data['data']['balances']:
             if balance['coin'] == base_currency:
-                return float(balance['free'])
+                free_balance = float(balance['free'])
+                logger.info(f"Fetched balance for {base_currency}: {free_balance}")
+                return free_balance
     logger.error(f"Failed to fetch balance for {symbol}")
     return 0.0
 
-async def send_telegram_notification(symbol):
+async def send_telegram_notification(symbol, error_message):
     try:
         bot = Bot(token=TELEGRAM_TOKEN)
-        message = f"Failed to place SELL order for {symbol} after 5 attempts."
+        message = f"Failed to place SELL order for {symbol} after 5 attempts. Error: {error_message}"
         await bot.send_message(chat_id=CHAT_ID, text=message)
         logger.info(f"Sent Telegram notification for failed SELL order on {symbol}")
     except Exception as e:
@@ -222,48 +224,38 @@ def place_market_order(symbol, side, amount_usdt=None, max_retries=5):
                 return None
         body["size"] = f"{quantity:.{base_precision}f}"
 
-    # Get previous order ID for comparison
-    previous_order_id = None
-    if symbol in order_history and order_history[symbol]:
-        previous_order_id = order_history[symbol][-1]['order_id']
-
-    # Retry logic for sell orders
     retries = 0
-    order_id = None
     while retries < max_retries if side.upper() == "SELL" else retries < 1:
         response = api_request("POST", endpoint, params, body)
         if response and 'data' in response and response['result']:
             order_id = response['data']['orderId']
-            if order_id != previous_order_id:
-                logger.info(f"Market {side} order placed for {pionex_symbol}: Order ID {order_id}")
-                # Store order ID in history
-                if symbol not in order_history:
-                    order_history[symbol] = []
-                order_history[symbol].append({'side': side, 'order_id': order_id, 'timestamp': time.time()})
-                if side.upper() == "BUY":
-                    quantity = amount_usdt / best_ask
-                    buy_quantities[symbol] = quantity
-                    logger.info(f"Stored buy quantity for {symbol}: {quantity}")
-                elif side.upper() == "SELL":
-                    buy_quantities.pop(symbol, None)
-                    logger.info(f"Cleared buy quantity for {symbol}")
-                return order_id
-            else:
-                logger.error(f"Order ID {order_id} matches previous order ID, treating as failure")
+            logger.info(f"Market {side} order placed for {pionex_symbol}: Order ID {order_id}")
+            if side.upper() == "BUY":
+                buy_order_ids[symbol] = order_id
+                quantity = amount_usdt / best_ask if amount_usdt else quantity
+                buy_quantities[symbol] = quantity
+                logger.info(f"Stored buy order ID {order_id} and quantity {quantity} for {symbol}")
+            elif side.upper() == "SELL" and not amount_usdt:  # Full balance sell
+                buy_order_ids[symbol] = None
+                buy_quantities.pop(symbol, None)
+                logger.info(f"Cleared buy order ID and quantity for {symbol}")
+            return order_id
         logger.error(f"Market {side} order failed for {pionex_symbol}: {response}")
         retries += 1
         if side.upper() == "SELL" and retries < max_retries:
             logger.info(f"Retrying SELL order for {symbol} (Attempt {retries + 1}/{max_retries})")
-            time.sleep(1)  # Delay between retries
+            body["size"] = f"{get_balance(symbol):.{base_precision}f}"  # Fetch latest balance
+            time.sleep(5)  # 5-second delay between retries
         elif side.upper() == "SELL" and retries == max_retries:
-            logger.error(f"Failed to place SELL order for {symbol} after {max_retries} attempts")
-            asyncio.create_task(send_telegram_notification(symbol))
+            error_message = f"Failed to place SELL order for {symbol} after {max_retries} attempts"
+            logger.error(error_message)
+            asyncio.create_task(send_telegram_notification(symbol, error_message))
     return None
 
 # Trading Logic
 async def check_and_trade(symbol):
     try:
-        logger.info(f"Checking {symbol} - Last order: {last_orders.get(symbol, 'None')}")
+        logger.info(f"Checking {symbol} - Buy order ID: {buy_order_ids.get(symbol, 'None')}")
         # Fetch 15-minute candle data from Pionex
         data = get_historical_data(symbol, '15M', limit=250)
         if data is None or data.empty:
@@ -280,20 +272,16 @@ async def check_and_trade(symbol):
         ema9_previous = data['EMA9'].iloc[-3]
         ema200_previous = data['EMA200'].iloc[-3]
 
-        logger.info(f"{symbol} - EMA9: {ema9_current:.2f}, EMA200: {ema200_current:.2f}")
-
-        # Detect EMA crossover
-        last_order_side = last_orders.get(symbol)
+        logger.info(f"{symbol} - EMA9: {ema9_current:.8f}, EMA200: {ema200_current:.8f}")
 
         # Bullish crossover: EMA9 crosses above EMA200
         if ema9_current > ema200_current and ema9_previous <= ema200_previous:
-            if last_order_side != "BUY":
+            if buy_order_ids.get(symbol) is None:
                 # Place buy order for $15
                 buy_order_id = place_market_order(symbol, "BUY", amount_usdt=15.0)
                 if buy_order_id:
                     logger.info(f"Placed BUY order for {symbol} (EMA crossover, Order ID: {buy_order_id})")
-                    last_orders[symbol] = "BUY"
-                    # Immediately place sell order for $14, do not update last_orders
+                    # Immediately place sell order for $14
                     sell_order_id = place_market_order(symbol, "SELL", amount_usdt=14.0)
                     if sell_order_id:
                         logger.info(f"Placed SELL order for {symbol} (post-buy, Order ID: {sell_order_id})")
@@ -302,27 +290,25 @@ async def check_and_trade(symbol):
                 else:
                     logger.error(f"Failed to place BUY order for {symbol}")
             else:
-                logger.info(f"Skipped BUY order for {symbol}: Already in BUY position")
+                logger.info(f"Skipped BUY order for {symbol}: Existing buy order ID {buy_order_ids[symbol]}")
 
         # Cross under: EMA9 crosses below EMA200
         elif ema9_current < ema200_current and ema9_previous >= ema200_previous:
-            if last_order_side == "BUY":
-                # Place buy order for $11
-                buy_order_id = place_market_order(symbol, "BUY", amount_usdt=11.0)
+            if buy_order_ids.get(symbol) is not None:
+                # Place buy order for $14
+                buy_order_id = place_market_order(symbol, "BUY", amount_usdt=14.0)
                 if buy_order_id:
                     logger.info(f"Placed BUY order for {symbol} (EMA cross under, Order ID: {buy_order_id})")
-                    last_orders[symbol] = "BUY"
                     # Immediately sell entire balance
                     sell_order_id = place_market_order(symbol, "SELL")
                     if sell_order_id:
                         logger.info(f"Placed SELL order for entire balance of {symbol} (Order ID: {sell_order_id})")
-                        last_orders[symbol] = "SELL"
                     else:
                         logger.error(f"Failed to place SELL order for {symbol} after {buy_order_id}")
                 else:
                     logger.error(f"Failed to place BUY order for {symbol}")
             else:
-                logger.info(f"Skipped BUY order for {symbol}: Last order is not BUY")
+                logger.info(f"Skipped BUY order for {symbol}: No existing buy order ID")
 
     except Exception as e:
         logger.error(f"Error processing {symbol}: {e}")
@@ -341,8 +327,8 @@ async def run_trading_loop():
                 await asyncio.sleep(0.5)  # Delay to avoid rate limits
             logger.info(f"Completed trading cycle for {len(valid_symbols)} valid symbols")
         else:
-            logger.info("No symbols selected, skipping trading cycle")
-        await asyncio.sleep(300)  # Run every minute
+            logger简介: No symbols selected, skipping trading cycle")
+        await asyncio.sleep(300)  # Run every 5 minutes
 
 # Main Function
 async def main():
