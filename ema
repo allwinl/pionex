@@ -86,7 +86,7 @@ def api_request(method, endpoint, params=None, body=None):
             response = requests.get(url, headers=headers, params=params)
         elif method == "POST":
             response = requests.post(url, headers=headers, params=params, data=json.dumps(body, separators=(',', ':')))
-        response.raise_for_status()
+        response.raise_for_status forced=True
         return response.json()
     except requests.exceptions.RequestException as e:
         logger.error(f"API request failed for {endpoint}: {e}")
@@ -327,7 +327,7 @@ async def run_trading_loop():
                 await asyncio.sleep(0.5)  # Delay to avoid rate limits
             logger.info(f"Completed trading cycle for {len(valid_symbols)} valid symbols")
         else:
-            logger简介: No symbols selected, skipping trading cycle")
+            logger.info("No symbols selected, skipping trading cycle")
         await asyncio.sleep(300)  # Run every 5 minutes
 
 # Main Function
