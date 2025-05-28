@@ -8,6 +8,7 @@ import json
 import logging
 import asyncio
 import nest_asyncio
+import ta
 from telegram import Bot
 import config  # User must provide this module
 
@@ -138,19 +139,9 @@ def get_historical_data(symbol, interval='15M', limit=250):
 
 def calculate_emas(df):
     try:
-        # Custom EMA calculation with SMA as initial value
-        def compute_ema(series, period):
-            # Calculate SMA for the first 'period' values
-            sma = series.iloc[:period].mean()
-            alpha = 2 / (period + 1)
-            ema = [sma] * period  # Initialize with SMA for first 'period' values
-            for i in range(period, len(series)):
-                ema.append((series.iloc[i] * alpha) + (ema[-1] * (1 - alpha)))
-            return pd.Series(ema, index=series.index).round(8)
-
-        # Calculate EMA9 and EMA200
-        df['EMA9'] = compute_ema(df['Close'], 9)
-        df['EMA200'] = compute_ema(df['Close'], 200)
+        # Calculate EMAs using ta library with 8 decimal places to match Pionex
+        df['EMA9'] = ta.trend.ema_indicator(df['Close'], window=9).round(8)
+        df['EMA200'] = ta.trend.ema_indicator(df['Close'], window=200).round(8)
         return df
     except Exception as e:
         logger.error(f"Failed to calculate EMAs: {e}")
@@ -264,6 +255,7 @@ def place_market_order(symbol, side, amount_usdt=None, max_retries=5):
 # Trading Logic
 async def check_and_trade(symbol):
     try:
+        logger.info(f"Checking {symbol} - Buy order ID: {buy_order_ids.get(symbol, 'None')}")
         # Fetch 15-minute candle data from Pionex
         data = get_historical_data(symbol, '15M', limit=250)
         if data is None or data.empty:
@@ -280,7 +272,6 @@ async def check_and_trade(symbol):
         ema9_previous = data['EMA9'].iloc[-3]
         ema200_previous = data['EMA200'].iloc[-3]
 
-        # Log only EMA values
         logger.info(f"{symbol} - EMA9: {ema9_current:.8f}, EMA200: {ema200_current:.8f}")
 
         # Bullish crossover: EMA9 crosses above EMA200
