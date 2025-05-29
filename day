@@ -191,7 +191,7 @@ async def send_error_notification(bot, chat_id, symbol, error_message):
     except Exception as e:
         logger.error(f"Failed to send Telegram error notification for {symbol}: {e}")
 
-def place_market_order(symbol, side, amount_usdt=12.0, max_retries=5):
+def place_market_order(symbol, side, amount_usdt=12.0, max_retries=10):
     endpoint = "/api/v1/trade/order"
     params = {}
     symbol_info = get_symbol_info(symbol)
@@ -238,7 +238,7 @@ def place_market_order(symbol, side, amount_usdt=12.0, max_retries=5):
         retries += 1
         if side.upper() == "SELL" and retries < max_retries:
             # Reduce sell quantity by 0.1% for retries
-            quantity *= (1 - 0.001)  # Reduce by 0.1%
+            quantity *= (1 - 0.0015)  # Reduce by 0.1%
             body["size"] = f"{quantity:.{base_precision}f}"
             logger.info(f"Retrying SELL order for {symbol} with reduced quantity {quantity:.{base_precision}f} (Attempt {retries + 1}/{max_retries})")
             time.sleep(5)  # 5-second delay between retries
