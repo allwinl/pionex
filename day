@@ -42,8 +42,8 @@ PIONEX_SECRET_KEY = config.PIONEX_SECRET_KEY
 
 # Global variables
 SELECTED_SYMBOLS = []  # Persists until /reset_symbols
-last_order_ids = {}  # Track last order ID for each symbol to verify successful placement
-last_order_types = {}  # Track last order type (BUY or SELL) for each symbol
+last_order_ids = {}  # Track last order ID for each symbol
+last_order_types = {}  # Track last order type (BUY or SELL)
 
 # Valid intervals for Pionex kline API
 VALID_INTERVALS = ['1M', '5M', '15M', '30M', '60M', '4H', '8H', '12H', '1D']
@@ -106,13 +106,15 @@ def validate_symbol(symbol):
     valid_symbols = fetch_pionex_symbols()
     return symbol.upper() in valid_symbols
 
-# Fetch historical OHLCV data from Pionex
-def get_historical_data(symbol, interval='1D', limit=2):
+# Fetch historical OHLCV data and current price to construct the current day's candle
+def get_historical_data(symbol, interval='1D', limit=1):
     try:
         if interval not in VALID_INTERVALS:
             logger.error(f"Invalid interval {interval} for {symbol}. Valid intervals: {VALID_INTERVALS}")
             return None
         pionex_symbol = symbol.replace("USDT", "_USDT")
+        
+        # Fetch the most recent completed daily candle
         endpoint = "/api/v1/market/klines"
         params = {
             "symbol": pionex_symbol,
@@ -124,15 +126,39 @@ def get_historical_data(symbol, interval='1D', limit=2):
             logger.error(f"Failed to fetch {interval} data for {symbol}: Invalid API response - {data}")
             return None
         klines = data['data']['klines']
-        if len(klines) < 2:
-            logger.error(f"Insufficient {interval} data for {symbol}: Only {len(klines)} klines received")
+        if len(klines) < 1:
+            logger.error(f"No {interval} data received for {symbol}")
             return None
-        df = pd.DataFrame(klines, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
+
+        # Get current market price to simulate the current day's candle
+        best_bid, best_ask = get_current_price(symbol)
+        if best_bid is None or best_ask is None:
+            logger.error(f"Failed to fetch current price for {symbol}")
+            return None
+        current_price = (best_bid + best_ask) / 2  # Midpoint of bid and ask
+
+        # Construct the current day's candle
+        latest_kline = klines[-1]
+        current_time = pd.Timestamp.now(tz='UTC').floor('D')  # Start of current day in UTC
+        open_price = float(latest_kline['open'])  # Use open from the latest completed candle
+        high_price = max(float(latest_kline['high']), current_price)  # Update high if current price is higher
+        low_price = min(float(latest_kline['low']), current_price)   # Update low if current price is lower
+        volume = float(latest_kline['volume'])  # Use volume from latest candle (approximation)
+
+        # Create DataFrame for the current day's candle
+        df = pd.DataFrame({
+            'time': [int(current_time.timestamp() * 1000)],
+            'open': [open_price],
+            'high': [high_price],
+            'low': [low_price],
+            'close': [current_price],
+            'volume': [volume]
+        })
         df['timestamp'] = pd.to_datetime(df['time'], unit='ms')
         df.set_index('timestamp', inplace=True)
         df = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
         df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
-        logger.info(f"Successfully fetched {len(df)} {interval} klines for {symbol}")
+        logger.info(f"Constructed current {interval} candle for {symbol}: Open={open_price}, Close={current_price}")
         return df
     except Exception as e:
         logger.error(f"Failed to fetch {interval} data for {symbol}: {e}")
@@ -224,7 +250,6 @@ def place_market_order(symbol, side, amount_usdt=12.0, max_retries=10):
         response = api_request("POST", endpoint, params, body)
         if response and 'data' in response and response['result']:
             order_id = response['data']['orderId']
-            # Verify order ID is different from the last one
             if last_order_ids.get(symbol) != order_id:
                 logger.info(f"Market {side} order placed for {pionex_symbol}: Order ID {order_id}")
                 last_order_ids[symbol] = order_id
@@ -237,39 +262,34 @@ def place_market_order(symbol, side, amount_usdt=12.0, max_retries=10):
         logger.error(f"Market {side} order failed for {pionex_symbol}: {response}")
         retries += 1
         if side.upper() == "SELL" and retries < max_retries:
-            # Reduce sell quantity by 0.1% for retries
             quantity *= (1 - 0.0015)  # Reduce by 0.1%
             body["size"] = f"{quantity:.{base_precision}f}"
             logger.info(f"Retrying SELL order for {symbol} with reduced quantity {quantity:.{base_precision}f} (Attempt {retries + 1}/{max_retries})")
-            time.sleep(5)  # 5-second delay between retries
+            time.sleep(5)
         elif retries == max_retries:
             error_message = f"Failed to place {side} order for {symbol} after {max_retries} attempts"
             logger.error(error_message)
             asyncio.create_task(send_error_notification(bot, config.CHAT_ID, symbol, error_message))
             return None
         elif side.upper() == "BUY":
-            break  # No retries for BUY orders
+            break
     return None
 
 # Trading Logic
 async def check_and_trade(symbol, bot, chat_id):
     try:
         logger.info(f"Checking {symbol} - Last order type: {last_order_types.get(symbol, 'None')} - Last order ID: {last_order_ids.get(symbol, 'None')}")
-        # Fetch daily candle data from Pionex
-        data = get_historical_data(symbol, '1D', limit=2)
+        data = get_historical_data(symbol, '1D', limit=1)
         if data is None or data.empty:
             logger.error(f"No daily data for {symbol}")
             return
 
-        # Get the latest daily candle data
         open_price = data['Open'].iloc[-1]
         close_price = data['Close'].iloc[-1]
 
         logger.info(f"{symbol} - Open: {open_price:.8f}, Close: {close_price:.8f}")
 
-        # Bullish candle: Close > Open
         if close_price > open_price and last_order_types.get(symbol) != "BUY":
-            # Check USDT balance for buy
             usdt_balance = get_balance("USDT")
             if usdt_balance >= 12.0:
                 order_id = place_market_order(symbol, "BUY", amount_usdt=12.0)
@@ -282,9 +302,7 @@ async def check_and_trade(symbol, bot, chat_id):
             else:
                 logger.info(f"Skipped BUY order for {symbol}: Insufficient USDT balance ({usdt_balance})")
 
-        # Bearish candle: Close < Open
         elif close_price < open_price and last_order_types.get(symbol) != "SELL":
-            # Check base currency balance for sell
             balance = get_balance(symbol)
             if balance > 0:
                 order_id = place_market_order(symbol, "SELL")
@@ -350,29 +368,25 @@ async def run_trading_loop(application: Application):
         if SELECTED_SYMBOLS:
             valid_symbols = []
             for symbol in SELECTED_SYMBOLS:
-                data = get_historical_data(symbol, '1D', limit=2)
+                data = get_historical_data(symbol, '1D', limit=1)
                 if data is not None and not data.empty:
                     valid_symbols.append(symbol)
                     await check_and_trade(symbol, bot, chat_id)
-                await asyncio.sleep(1)  # Delay to avoid rate limits
+                await asyncio.sleep(1)
             logger.info(f"Completed trading cycle for {len(valid_symbols)} valid symbols: {valid_symbols}")
         else:
             logger.info("No symbols selected, skipping trading cycle")
-        await asyncio.sleep(60)  # Run every 24 hours for daily candles
+        await asyncio.sleep(60)  # Check every minute for more responsive updates
 
 # Main Function
 async def main():
     application = Application.builder().token(config.TELEGRAM_TOKEN).build()
 
-    # Add command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("set_symbols", set_symbols))
     application.add_handler(CommandHandler("reset_symbols", reset_symbols))
 
-    # Start trading loop
     asyncio.create_task(run_trading_loop(application))
-
-    # Start the bot
     await application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
