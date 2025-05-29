@@ -1,5 +1,4 @@
 import requests
-import ccxt
 import pandas as pd
 import time
 import hmac
@@ -33,9 +32,8 @@ logger.handlers.clear()
 logger.addHandler(file_handler)
 logger.addHandler(console_handler)
 
-# Suppress urllib3 and ccxt noise
+# Suppress urllib3 noise
 logging.getLogger('urllib3').setLevel(logging.WARNING)
-logging.getLogger('ccxt').setLevel(logging.WARNING)
 
 # Pionex API setup
 BASE_URL = "https://api.pionex.com"
@@ -95,8 +93,10 @@ def fetch_pionex_symbols():
     params = {}
     data = api_request("GET", endpoint, params)
     if data and 'data' in data and 'symbols' in data['data']:
-        return [s['symbol'].replace("_USDT", "USDT") for s in data['data']['symbols'] 
-                if s['quoteCurrency'] == 'USDT' and s['enable']]
+        symbols = [s['symbol'].replace("_USDT", "USDT") for s in data['data']['symbols'] 
+                   if s['quoteCurrency'] == 'USDT' and s['enable']]
+        logger.info(f"Fetched {len(symbols)} USDT trading pairs from Pionex: {', '.join(symbols[:5])}...")
+        return symbols
     logger.error("Failed to fetch symbols from Pionex")
     return []
 
@@ -105,20 +105,31 @@ def validate_symbol(symbol):
     valid_symbols = fetch_pionex_symbols()
     return symbol.upper() in valid_symbols
 
-# Binance Data Functions
-binance = ccxt.binance({
-    'apiKey': config.BINANCE_API_KEY,
-    'secret': config.BINANCE_API_SECRET,
-    'enableRateLimit': True,
-    'options': {'defaultType': 'future'}
-})
-
-def get_historical_data(symbol, interval='1d', limit=2):
+# Fetch historical OHLCV data from Pionex
+def get_historical_data(symbol, interval='1D', limit=2):
     try:
-        ohlcv = binance.fetch_ohlcv(symbol, interval, limit=limit)
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        if interval not in VALID_INTERVALS:
+            logger.error(f"Invalid interval {interval} for {symbol}. Valid intervals: {VALID_INTERVALS}")
+            return None
+        pionex_symbol = symbol.replace("USDT", "_USDT")
+        endpoint = "/api/v1/market/klines"
+        params = {
+            "symbol": pionex_symbol,
+            "interval": interval,
+            "limit": limit
+        }
+        data = api_request("GET", endpoint, params)
+        if not data or 'data' not in data or 'klines' not in data['data']:
+            logger.error(f"Failed to fetch {interval} data for {symbol}: Invalid API response - {data}")
+            return None
+        klines = data['data']['klines']
+        if len(klines) < 2:
+            logger.error(f"Insufficient {interval} data for {symbol}: Only {len(klines)} klines received")
+            return None
+        df = pd.DataFrame(klines, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['time'], unit='ms')
         df.set_index('timestamp', inplace=True)
+        df = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
         df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
         logger.info(f"Successfully fetched {len(df)} {interval} klines for {symbol}")
         return df
@@ -236,8 +247,8 @@ def place_market_order(symbol, side, amount_usdt=12.0, max_retries=5):
 async def check_and_trade(symbol, bot, chat_id):
     try:
         logger.info(f"Checking {symbol} - Buy order ID: {buy_order_ids.get(symbol, 'None')}")
-        # Fetch daily candle data
-        data = get_historical_data(symbol, '1d', limit=2)
+        # Fetch daily candle data from Pionex
+        data = get_historical_data(symbol, '1D', limit=2)
         if data is None or data.empty:
             logger.error(f"No daily data for {symbol}")
             return
@@ -326,7 +337,7 @@ async def run_trading_loop(application: Application):
         if SELECTED_SYMBOLS:
             valid_symbols = []
             for symbol in SELECTED_SYMBOLS:
-                data = get_historical_data(symbol, '1d', limit=2)
+                data = get_historical_data(symbol, '1D', limit=2)
                 if data is not None and not data.empty:
                     valid_symbols.append(symbol)
                     await check_and_trade(symbol, bot, chat_id)
@@ -334,7 +345,7 @@ async def run_trading_loop(application: Application):
             logger.info(f"Completed trading cycle for {len(valid_symbols)} valid symbols: {valid_symbols}")
         else:
             logger.info("No symbols selected, skipping trading cycle")
-        await asyncio.sleep(86400)  # Run every 24 hours for daily candles
+        await asyncio.sleep(60)  # Run every 24 hours for daily candles
 
 # Main Function
 async def main():
