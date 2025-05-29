@@ -262,8 +262,8 @@ async def check_and_trade(symbol, bot, chat_id):
             return
 
         # Get the latest daily candle data
-        open_price = data['Open'].iloc[-2]
-        close_price = data['Close'].iloc[-2]
+        open_price = data['Open'].iloc[-1]
+        close_price = data['Close'].iloc[-1]
 
         logger.info(f"{symbol} - Open: {open_price:.8f}, Close: {close_price:.8f}")
 
@@ -354,7 +354,7 @@ async def run_trading_loop(application: Application):
                 if data is not None and not data.empty:
                     valid_symbols.append(symbol)
                     await check_and_trade(symbol, bot, chat_id)
-                await asyncio.sleep(0.5)  # Delay to avoid rate limits
+                await asyncio.sleep(1)  # Delay to avoid rate limits
             logger.info(f"Completed trading cycle for {len(valid_symbols)} valid symbols: {valid_symbols}")
         else:
             logger.info("No symbols selected, skipping trading cycle")
