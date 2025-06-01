@@ -217,7 +217,7 @@ async def send_error_notification(bot, chat_id, symbol, error_message):
     except Exception as e:
         logger.error(f"Failed to send Telegram error notification for {symbol}: {e}")
 
-def place_market_order(symbol, side, amount_usdt=100, max_retries=10):
+def place_market_order(symbol, side, amount_usdt=15, max_retries=10):
     endpoint = "/api/v1/trade/order"
     params = {}
     symbol_info = get_symbol_info(symbol)
@@ -291,8 +291,8 @@ async def check_and_trade(symbol, bot, chat_id):
 
         if close_price > open_price and last_order_types.get(symbol) != "BUY":
             usdt_balance = get_balance("USDT")
-            if usdt_balance >= 100:
-                order_id = place_market_order(symbol, "BUY", amount_usdt=100)
+            if usdt_balance >= 15:
+                order_id = place_market_order(symbol, "BUY", amount_usdt=15)
                 if order_id:
                     logger.info(f"Placed BUY order for {symbol} (Bullish candle, Order ID: {order_id})")
                     await send_order_notification(bot, chat_id, symbol, "BUY", close_price, order_id)
