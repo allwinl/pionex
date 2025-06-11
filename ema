@@ -272,20 +272,28 @@ async def check_and_trade(symbol):
         ema200_current = data['EMA200'].iloc[-2]
         ema9_previous = data['EMA9'].iloc[-3]
         ema200_previous = data['EMA200'].iloc[-3]
-        ema2_current = data['EMA9'].iloc[-2]
-        ema2_previous = data['EMA200'].iloc[-3]
-        
+        ema2_current = data['EMA2'].iloc[-2]  # Fixed: Use EMA2 instead of EMA9
+        ema2_previous = data['EMA2'].iloc[-3]  # Fixed: Use EMA2 instead of EMA200
 
-        logger.info(f"{symbol} - EMA9: {ema9_current:.8f}, EMA200: {ema200_current:.8f}")
+        # Calculate open-to-close price ratio for the latest closed candle
+        open_price = data['Open'].iloc[-2]
+        close_price = data['Close'].iloc[-2]
+        price_ratio = abs(open_price - close_price) / open_price if open_price != 0 else float('inf')
+        price_ratio_percent = price_ratio * 100
 
-        # Bullish crossover: EMA9 crosses above EMA200
-        if ema9_current > ema200_current and ema9_previous <= ema200_previous:
+        logger.info(f"{symbol} - EMA9: {ema9_current:.8f}, EMA200: {ema200_current:.8f}, "
+                    f"Price Ratio: {price_ratio_percent:.2f}%")
+
+        # Bullish crossover: EMA9 crosses above EMA200 and price ratio < 2%
+        if (ema9_current > ema200_current and 
+            ema9_previous <= ema200_previous and 
+            price_ratio < 0.02):
             if buy_order_ids.get(symbol) is None:
-                # Place buy order for $15
+                # Place buy order for $12
                 buy_order_id = place_market_order(symbol, "BUY", amount_usdt=12)
                 if buy_order_id:
-                    logger.info(f"Placed BUY order for {symbol} (EMA crossover, Order ID: {buy_order_id})")
-                    # Immediately place sell order for $14
+                    logger.info(f"Placed BUY order for {symbol} (EMA crossover, Price Ratio {price_ratio_percent:.2f}%, Order ID: {buy_order_id})")
+                    # Immediately place sell order for $11
                     sell_order_id = place_market_order(symbol, "SELL", amount_usdt=11)
                     if sell_order_id:
                         logger.info(f"Placed SELL order for {symbol} (post-buy, Order ID: {sell_order_id})")
@@ -296,10 +304,10 @@ async def check_and_trade(symbol):
             else:
                 logger.info(f"Skipped BUY order for {symbol}: Existing buy order ID {buy_order_ids[symbol]}")
 
-        # Cross under: EMA9 crosses below EMA200
+        # Cross under: EMA2 crosses below EMA9
         elif ema2_current < ema9_current and ema2_previous >= ema9_previous:
             if buy_order_ids.get(symbol) is not None:
-                # Place buy order for $14
+                # Place buy order for $11
                 buy_order_id = place_market_order(symbol, "BUY", amount_usdt=11)
                 if buy_order_id:
                     logger.info(f"Placed BUY order for {symbol} (EMA cross under, Order ID: {buy_order_id})")
