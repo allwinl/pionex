@@ -1,0 +1,411 @@
+import requests
+import pandas as pd
+import time
+import hmac
+import hashlib
+from urllib.parse import urlencode
+import json
+import logging
+import asyncio
+import nest_asyncio
+import ta
+from telegram import Bot
+import config  # User must provide this module
+import numpy as np
+
+# Apply nest_asyncio to allow nested event loops
+nest_asyncio.apply()
+
+# Set up logging
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+file_handler = logging.FileHandler('trading_bot.log')
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+logger.handlers.clear()
+logger.addHandler(file_handler)
+logger.addHandler(console_handler)
+
+# Suppress urllib3 noise
+logging.getLogger('urllib3').setLevel(logging.WARNING)
+
+# Pionex API setup
+BASE_URL = "https://api.pionex.com"
+PIONEX_API_KEY = config.PIONEX_API_KEY
+PIONEX_SECRET_KEY = config.PIONEX_SECRET_KEY
+
+# Telegram setup
+TELEGRAM_TOKEN = config.TELEGRAM_TOKEN
+CHAT_ID = config.CHAT_ID
+
+# Global variables
+SELECTED_SYMBOLS = []  # Will be populated with Pionex USDT pairs
+last_orders = {}  # Track last order side for each symbol
+buy_order_ids = {}  # Track buy order IDs for each symbol
+buy_quantities = {}  # Track quantity purchased during buy orders
+
+# Valid intervals for Pionex kline API
+VALID_INTERVALS = ['1M', '5M', '15M', '30M', '60M', '4H', '8H', '12H', '1D']
+
+# Pionex API Functions
+def generate_signature(method, path, params, body=None):
+    timestamp = str(int(time.time() * 1000))
+    query_params = params.copy()
+    query_params['timestamp'] = timestamp
+    sorted_params = urlencode(sorted(query_params.items()), quote_via=lambda x, *_: x)
+    path_url = f"{path}?{sorted_params}"
+    string_to_sign = f"{method.upper()}{path_url}"
+    if body:
+        body_str = json.dumps(body, separators=(',', ':'))
+        string_to_sign += body_str
+    signature = hmac.new(
+        PIONEX_SECRET_KEY.encode('utf-8'),
+        string_to_sign.encode('utf-8'),
+        hashlib.sha256
+    ).hexdigest()
+    return signature, timestamp
+
+def api_request(method, endpoint, params=None, body=None):
+    if params is None:
+        params = {}
+    signature, timestamp = generate_signature(method, endpoint, params, body)
+    params['timestamp'] = timestamp
+    url = f"{BASE_URL}{endpoint}"
+    headers = {
+        "PIONEX-KEY": PIONEX_API_KEY,
+        "PIONEX-SIGNATURE": signature,
+        "Content-Type": "application/json"
+    }
+    try:
+        if method == "GET":
+            response = requests.get(url, headers=headers, params=params)
+        elif method == "POST":
+            response = requests.post(url, headers=headers, params=params, data=json.dumps(body, separators=(',', ':')))
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        logger.error(f"API request failed for {endpoint}: {e}")
+        return None
+
+# Fetch valid symbols from Pionex
+def fetch_pionex_symbols():
+    endpoint = "/api/v1/common/symbols"
+    params = {}
+    data = api_request("GET", endpoint, params)
+    if data and 'data' in data and 'symbols' in data['data']:
+        symbols = [s['symbol'].replace("_USDT", "USDT") for s in data['data']['symbols'] 
+                   if s['quoteCurrency'] == 'USDT' and s['enable']]
+        logger.info(f"Fetched {len(symbols)} USDT trading pairs from Pionex: {', '.join(symbols[:5])}...")
+        return symbols
+    logger.error("Failed to fetch symbols from Pionex")
+    return []
+
+# Fetch historical OHLCV data from Pionex
+def get_historical_data(symbol, interval='15M', limit=250):
+    try:
+        if interval not in VALID_INTERVALS:
+            logger.error(f"Invalid interval {interval} for {symbol}. Valid intervals: {VALID_INTERVALS}")
+            return None
+        pionex_symbol = symbol.replace("USDT", "_USDT")
+        endpoint = "/api/v1/market/klines"
+        params = {
+            "symbol": pionex_symbol,
+            "interval": interval,
+            "limit": limit
+        }
+        data = api_request("GET", endpoint, params)
+        if not data or 'data' not in data or 'klines' not in data['data']:
+            logger.error(f"Failed to fetch {interval} data for {symbol}: Invalid API response - {data}")
+            return None
+        klines = data['data']['klines']
+        if len(klines) < 200 and interval != '1D':
+            logger.error(f"Insufficient {interval} data for {symbol}: Only {len(klines)} klines received")
+            return None
+        df = pd.DataFrame(klines, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['time'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        df = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
+        df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+        logger.info(f"Successfully fetched {len(df)} {interval} klines for {symbol}")
+        return df
+    except Exception as e:
+        logger.error(f"Failed to fetch {interval} data for {symbol}: {e}")
+        return None
+
+def calculate_emas(df):
+    try:
+        # Calculate EMAs using ta library with 8 decimal places to match Pionex
+        df['EMA9'] = ta.trend.ema_indicator(df['Close'], window=9).round(8)
+        return df
+    except Exception as e:
+        logger.error(f"Failed to calculate EMAs: {e}")
+        return None
+
+def calculate_fibonacci_levels(df_daily):
+    try:
+        # Get the last 40 daily candles
+        df_40 = df_daily.tail(40)
+        if len(df_40) < 40:
+            logger.error("Insufficient daily data for Fibonacci calculation")
+            return None
+
+        # Find lowest and highest close prices and their timestamps
+        lowest_close = df_40['Close'].min()
+        highest_close = df_40['Close'].max()
+        lowest_close_time = df_40['Close'].idxmin()
+        highest_close_time = df_40['Close'].idxmax()
+
+        # Determine Fibonacci swing direction
+        if lowest_close_time < highest_close_time:
+            # Uptrend: Low to High
+            fib_low = lowest_close
+            fib_high = highest_close
+        else:
+            # Downtrend: High to Low
+            fib_low = highest_close
+            fib_high = lowest_close
+
+        # Calculate Fibonacci levels
+        diff = fib_high - fib_low
+        fib_levels = {
+            '0.0': fib_low,
+            '0.236': fib_high - diff * 0.236,
+            '0.382': fib_high - diff * 0.382,
+            '0.5': fib_high - diff * 0.5,
+            '0.618': fib_high - diff * 0.618,
+            '0.786': fib_high - diff * 0.786,
+            '1.0': fib_high
+        }
+        return fib_levels
+    except Exception as e:
+        logger.error(f"Failed to calculate Fibonacci levels: {e}")
+        return None
+
+# Pionex Trading Functions
+def get_symbol_info(symbol):
+    endpoint = "/api/v1/common/symbols"
+    pionex_symbol = symbol.replace("USDT", "_USDT")
+    params = {"symbols": pionex_symbol}
+    data = api_request("GET", endpoint, params)
+    if data and 'data' in data and 'symbols' in data['data'] and data['data']['symbols']:
+        return data['data']['symbols'][0]
+    logger.error(f"Failed to fetch symbol info for {pionex_symbol}")
+    return None
+
+def get_current_price(symbol):
+    endpoint = "/api/v1/market/depth"
+    pionex_symbol = symbol.replace("USDT", "_USDT")
+    params = {"symbol": pionex_symbol}
+    data = api_request("GET", endpoint, params)
+    if data and 'data' in data and 'bids' in data['data'] and 'asks' in data['data']:
+        best_bid = float(data['data']['bids'][0][0])
+        best_ask = float(data['data']['asks'][0][0])
+        return best_bid, best_ask
+    logger.error(f"Failed to fetch price for {pionex_symbol}")
+    return None, None
+
+def get_balance(symbol):
+    endpoint = "/api/v1/account/balances"
+    params = {}
+    data = api_request("GET", endpoint, params)
+    if data and 'data' in data and 'balances' in data['data']:
+        base_currency = symbol.replace("USDT", "")
+        for balance in data['data']['balances']:
+            if balance['coin'] == base_currency:
+                free_balance = float(balance['free'])
+                logger.info(f"Fetched balance for {base_currency}: {free_balance}")
+                return free_balance
+    logger.error(f"Failed to fetch balance for {symbol}")
+    return 0.0
+
+async def send_telegram_notification(symbol, error_message):
+    try:
+        bot = Bot(token=TELEGRAM_TOKEN)
+        message = f"Failed to place SELL order for {symbol} after 5 attempts. Error: {error_message}"
+        await bot.send_message(chat_id=CHAT_ID, text=message)
+        logger.info(f"Sent Telegram notification for failed SELL order on {symbol}")
+    except Exception as e:
+        logger.error(f"Failed to send Telegram notification for {symbol}: {e}")
+
+def place_market_order(symbol, side, amount_usdt=None, max_retries=5):
+    endpoint = "/api/v1/trade/order"
+    params = {}
+    symbol_info = get_symbol_info(symbol)
+    if not symbol_info:
+        return None
+    pionex_symbol = symbol.replace("USDT", "_USDT")
+    best_bid, best_ask = get_current_price(symbol)
+    if not best_bid or not best_ask:
+        return None
+    quote_precision = int(symbol_info['quotePrecision'])
+    base_precision = int(symbol_info['basePrecision'])
+    min_amount = float(symbol_info['minAmount'])
+    body = {
+        "symbol": pionex_symbol,
+        "side": side.upper(),
+        "type": "MARKET",
+    }
+    if side.upper() == "BUY":
+        amount_usdt = max(amount_usdt, min_amount)
+        body["amount"] = f"{amount_usdt:.{quote_precision}f}"
+    else:  # SELL
+        if amount_usdt:
+            quantity = amount_usdt / best_bid
+        else:  # Sell entire balance
+            quantity = get_balance(symbol)
+            if quantity <= 0:
+                logger.error(f"No balance available to sell for {symbol}")
+                return None
+        body["size"] = f"{quantity:.{base_precision}f}"
+
+    retries = 0
+    while retries < max_retries if side.upper() == "SELL" else retries < 1:
+        response = api_request("POST", endpoint, params, body)
+        if response and 'data' in response and response['result']:
+            order_id = response['data']['orderId']
+            logger.info(f"Market {side} order placed for {pionex_symbol}: Order ID {order_id}")
+            if side.upper() == "BUY":
+                buy_order_ids[symbol] = order_id
+                quantity = amount_usdt / best_ask if amount_usdt else quantity
+                buy_quantities[symbol] = quantity
+                logger.info(f"Stored buy order ID {order_id} and quantity {quantity} for {symbol}")
+            elif side.upper() == "SELL" and not amount_usdt:  # Full balance sell
+                buy_order_ids[symbol] = None
+                buy_quantities.pop(symbol, None)
+                logger.info(f"Cleared buy order ID and quantity for {symbol}")
+            return order_id
+        logger.error(f"Market {side} order failed for {pionex_symbol}: {response}")
+        retries += 1
+        if side.upper() == "SELL" and retries < max_retries:
+            logger.info(f"Retrying SELL order for {symbol} (Attempt {retries + 1}/{max_retries})")
+            body["size"] = f"{get_balance(symbol):.{base_precision}f}"  # Fetch latest balance
+            time.sleep(5)  # 5-second delay between retries
+        elif side.upper() == "SELL" and retries == max_retries:
+            error_message = f"Failed to place SELL order for {symbol} after {max_retries} attempts"
+            logger.error(error_message)
+            asyncio.create_task(send_telegram_notification(symbol, error_message))
+    return None
+
+# Trading Logic
+async def check_and_trade(symbol):
+    try:
+        logger.info(f"Checking {symbol} - Buy order ID: {buy_order_ids.get(symbol, 'None')}")
+        # Fetch 15-minute candle data from Pionex
+        data_15m = get_historical_data(symbol, '15M', limit=250)
+        if data_15m is None or data_15m.empty:
+            return
+
+        # Fetch 1-day candle data for Fibonacci
+        data_daily = get_historical_data(symbol, '1D', limit=50)
+        if data_daily is None or data_daily.empty:
+            return
+
+        # Calculate EMAs on 15m data
+        data_15m = calculate_emas(data_15m)
+        if data_15m is None:
+            return
+
+        # Calculate Fibonacci levels
+        fib_levels = calculate_fibonacci_levels(data_daily)
+        if fib_levels is None:
+            return
+
+        # Get the latest and previous EMA9 values
+        ema9_current = data_15m['EMA9'].iloc[-2]
+        ema9_previous = data_15m['EMA9'].iloc[-3]
+
+        # Calculate open-to-close price ratio for the latest closed candle
+        open_price = data_15m['Open'].iloc[-2]
+        close_price = data_15m['Close'].iloc[-2]
+        price_ratio = abs(open_price - close_price) / open_price if open_price != 0 else float('inf')
+        price_ratio_percent = price_ratio * 100
+
+        logger.info(f"{symbol} - EMA9: {ema9_current:.8f}, Price Ratio: {price_ratio_percent:.2f}%, "
+                    f"Fib Levels: {', '.join([f'{k}:{v:.2f}' for k, v in fib_levels.items()])}")
+
+        # Buy condition: EMA9 crosses above any Fibonacci level and price ratio < 2%
+        buy_triggered = False
+        if price_ratio < 0.02 and buy_order_ids.get(symbol) is None:
+            for level, price in fib_levels.items():
+                if ema9_current > price and ema9_previous <= price:
+                    buy_order_id = place_market_order(symbol, "BUY", amount_usdt=12)
+                    if buy_order_id:
+                        logger.info(f"Placed BUY order for {symbol} (EMA9 crossed above Fib {level}, "
+                                    f"Price Ratio {price_ratio_percent:.2f}%, Order ID: {buy_order_id})")
+                        # Immediately place sell order for $11
+                        sell_order_id = place_market_order(symbol, "SELL", amount_usdt=11)
+                        if sell_order_id:
+                            logger.info(f"Placed SELL order for {symbol} (post-buy, Order ID: {sell_order_id})")
+                        else:
+                            logger.error(f"Failed to place SELL order for {symbol} after {buy_order_id}")
+                        buy_triggered = True
+                    else:
+                        logger.error(f"Failed to place BUY order for {symbol}")
+                    break  # Only trigger on the first crossed level
+
+        if buy_triggered:
+            return  # Skip sell logic if buy was just triggered
+
+        # Sell condition: EMA9 crosses below any Fibonacci level
+        if buy_order_ids.get(symbol) is not None:
+            for level, price in fib_levels.items():
+                if ema9_current < price and ema9_previous >= price:
+                    buy_order_id = place_market_order(symbol, "BUY", amount_usdt=11)
+                    if buy_order_id:
+                        logger.info(f"Placed BUY order for {symbol} (EMA9 crossed below Fib {level}, "
+                                    f"Order ID: {buy_order_id})")
+                        # Immediately sell entire balance
+                        sell_order_id = place_market_order(symbol, "SELL")
+                        if sell_order_id:
+                            logger.info(f"Placed SELL order for entire balance of {symbol} "
+                                        f"(Order ID: {sell_order_id})")
+                        else:
+                            logger.error(f"Failed to place SELL order for {symbol} after {buy_order_id}")
+                    else:
+                        logger.error(f"Failed to place BUY order for {symbol}")
+                    break  # Only trigger on the first crossed level
+        else:
+            logger.info(f"Skipped BUY order for {symbol}: No existing buy order ID")
+
+    except Exception as e:
+        logger.error(f"Error processing {symbol}: {e}")
+
+# Trading Loop
+async def run_trading_loop():
+    while True:
+        if SELECTED_SYMBOLS:
+            valid_symbols = []
+            for symbol in SELECTED_SYMBOLS:
+                # Check if symbol has sufficient data
+                data = get_historical_data(symbol, '15M', limit=250)
+                if data is not None and not data.empty:
+                    valid_symbols.append(symbol)
+                    await check_and_trade(symbol)
+                await asyncio.sleep(0.5)  # Delay to avoid rate limits
+            logger.info(f"Completed trading cycle for {len(valid_symbols)} valid symbols")
+        else:
+            logger.info("No symbols selected, skipping trading cycle")
+        await asyncio.sleep(300)  # Run every 5 minutes
+
+# Main Function
+async def main():
+    # Fetch Pionex USDT pairs
+    global SELECTED_SYMBOLS
+    SELECTED_SYMBOLS = fetch_pionex_symbols()
+    if not SELECTED_SYMBOLS:
+        logger.error("No USDT trading pairs found on Pionex. Exiting.")
+        return
+
+    logger.info(f"Starting trading bot with {len(SELECTED_SYMBOLS)} symbols: {', '.join(SELECTED_SYMBOLS[:5])}...")
+
+    # Start trading loop
+    await run_trading_loop()
+
+if __name__ == '__main__':
+    asyncio.run(main())
