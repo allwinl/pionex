@@ -141,7 +141,7 @@ def get_historical_data(symbol, interval='15M', limit=250):
 def calculate_emas(df):
     try:
         # Calculate EMAs using ta library with 8 decimal places to match Pionex
-        df['EMA9'] = ta.trend.ema_indicator(df['Close'], window=9).round(8)
+        df['EMA9'] = ta.trend.ema_indicator(df['Close'], window=3).round(8)
         return df
     except Exception as e:
         logger.error(f"Failed to calculate EMAs: {e}")
@@ -150,7 +150,7 @@ def calculate_emas(df):
 def calculate_fibonacci_levels(df_daily):
     try:
         # Get the last 40 daily candles
-        df_40 = df_daily.tail(40)
+        df_40 = df_daily.tail(50)
         if len(df_40) < 40:
             logger.error("Insufficient daily data for Fibonacci calculation")
             return None
@@ -302,7 +302,7 @@ async def check_and_trade(symbol):
             return
 
         # Fetch 1-day candle data for Fibonacci
-        data_daily = get_historical_data(symbol, '1D', limit=50)
+        data_daily = get_historical_data(symbol, '1D', limit=60)
         if data_daily is None or data_daily.empty:
             return
 
