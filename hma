@@ -1,0 +1,353 @@
+import requests
+import pandas as pd
+import time
+import hmac
+import hashlib
+from urllib.parse import urlencode
+import json
+import logging
+import asyncio
+import nest_asyncio
+import ta
+from telegram import Bot
+import config  # User must provide this module
+
+# Apply nest_asyncio to allow nested event loops
+nest_asyncio.apply()
+
+# Set up logging
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+file_handler = logging.FileHandler('trading_bot.log')
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+logger.handlers.clear()
+logger.addHandler(file_handler)
+logger.addHandler(console_handler)
+
+# Suppress urllib3 noise
+logging.getLogger('urllib3').setLevel(logging.WARNING)
+
+# Pionex API setup
+BASE_URL = "https://api.pionex.com"
+PIONEX_API_KEY = config.PIONEX_API_KEY
+PIONEX_SECRET_KEY = config.PIONEX_SECRET_KEY
+
+# Telegram setup
+TELEGRAM_TOKEN = config.TELEGRAM_TOKEN
+CHAT_ID = config.CHAT_ID
+
+# Global variables
+SELECTED_SYMBOLS = []  # Will be populated with Pionex USDT pairs
+last_orders = {}  # Track last order side for each symbol
+buy_order_ids = {}  # Track buy order IDs for each symbol
+buy_quantities = {}  # Track quantity purchased during buy orders
+
+# Valid intervals for Pionex kline API
+VALID_INTERVALS = ['1M', '5M', '15M', '30M', '60M', '4H', '8H', '12H', '1D']
+
+# Pionex API Functions
+def generate_signature(method, path, params, body=None):
+    timestamp = str(int(time.time() * 1000))
+    query_params = params.copy()
+    query_params['timestamp'] = timestamp
+    sorted_params = urlencode(sorted(query_params.items()), quote_via=lambda x, *_: x)
+    path_url = f"{path}?{sorted_params}"
+    string_to_sign = f"{method.upper()}{path_url}"
+    if body:
+        body_str = json.dumps(body, separators=(',', ':'))
+        string_to_sign += body_str
+    signature = hmac.new(
+        PIONEX_SECRET_KEY.encode('utf-8'),
+        string_to_sign.encode('utf-8'),
+        hashlib.sha256
+    ).hexdigest()
+    return signature, timestamp
+
+def api_request(method, endpoint, params=None, body=None):
+    if params is None:
+        params = {}
+    signature, timestamp = generate_signature(method, endpoint, params, body)
+    params['timestamp'] = timestamp
+    url = f"{BASE_URL}{endpoint}"
+    headers = {
+        "PIONEX-KEY": PIONEX_API_KEY,
+        "PIONEX-SIGNATURE": signature,
+        "Content-Type": "application/json"
+    }
+    try:
+        if method == "GET":
+            response = requests.get(url, headers=headers, params=params)
+        elif method == "POST":
+            response = requests.post(url, headers=headers, params=params, data=json.dumps(body, separators=(',', ':')))
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        logger.error(f"API request failed for {endpoint}: {e}")
+        return None
+
+# Fetch valid symbols from Pionex
+def fetch_pionex_symbols():
+    endpoint = "/api/v1/common/symbols"
+    params = {}
+    data = api_request("GET", endpoint, params)
+    if data and 'data' in data and 'symbols' in data['data']:
+        symbols = [s['symbol'].replace("_USDT", "USDT") for s in data['data']['symbols'] 
+                   if s['quoteCurrency'] == 'USDT' and s['enable']]
+        logger.info(f"Fetched {len(symbols)} USDT trading pairs from Pionex: {', '.join(symbols[:5])}...")
+        return symbols
+    logger.error("Failed to fetch symbols from Pionex")
+    return []
+
+# Fetch historical OHLCV data from Pionex
+def get_historical_data(symbol, interval='15M', limit=250):
+    try:
+        if interval not in VALID_INTERVALS:
+            logger.error(f"Invalid interval {interval} for {symbol}. Valid intervals: {VALID_INTERVALS}")
+            return None
+        pionex_symbol = symbol.replace("USDT", "_USDT")
+        endpoint = "/api/v1/market/klines"
+        params = {
+            "symbol": pionex_symbol,
+            "interval": interval,
+            "limit": limit
+        }
+        data = api_request("GET", endpoint, params)
+        if not data or 'data' not in data or 'klines' not in data['data']:
+            logger.error(f"Failed to fetch {interval} data for {symbol}: Invalid API response - {data}")
+            return None
+        klines = data['data']['klines']
+        if len(klines) < 200:
+            logger.error(f"Insufficient {interval} data for {symbol}: Only {len(klines)} klines received")
+            return None
+        df = pd.DataFrame(klines, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['time'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        df = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
+        df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+        logger.info(f"Successfully fetched {len(df)} {interval} klines for {symbol}")
+        return df
+    except Exception as e:
+        logger.error(f"Failed to fetch {interval} data for {symbol}: {e}")
+        return None
+
+def calculate_hma(df, period=14):
+    try:
+        # Calculate HMA using ta library
+        df['HMA14'] = ta.trend.hma_indicator(df['Close'], window=period).round(8)
+        return df
+    except Exception as e:
+        logger.error(f"Failed to calculate HMA: {e}")
+        return None
+
+# Pionex Trading Functions
+def get_symbol_info(symbol):
+    endpoint = "/api/v1/common/symbols"
+    pionex_symbol = symbol.replace("USDT", "_USDT")
+    params = {"symbols": pionex_symbol}
+    data = api_request("GET", endpoint, params)
+    if data and 'data' in data and 'symbols' in data['data'] and data['data']['symbols']:
+        return data['data']['symbols'][0]
+    logger.error(f"Failed to fetch symbol info for {pionex_symbol}")
+    return None
+
+def get_current_price(symbol):
+    endpoint = "/api/v1/market/depth"
+    pionex_symbol = symbol.replace("USDT", "_USDT")
+    params = {"symbol": pionex_symbol}
+    data = api_request("GET", endpoint, params)
+    if data and 'data' in data and 'bids' in data['data'] and 'asks' in data['data']:
+        best_bid = float(data['data']['bids'][0][0])
+        best_ask = float(data['data']['asks'][0][0])
+        return best_bid, best_ask
+    logger.error(f"Failed to fetch price for {pionex_symbol}")
+    return None, None
+
+def get_balance(symbol):
+    endpoint = "/api/v1/account/balances"
+    params = {}
+    data = api_request("GET", endpoint, params)
+    if data and 'data' in data and 'balances' in data['data']:
+        base_currency = symbol.replace("USDT", "")
+        for balance in data['data']['balances']:
+            if balance['coin'] == base_currency:
+                free_balance = float(balance['free'])
+                logger.info(f"Fetched balance for {base_currency}: {free_balance}")
+                return free_balance
+    logger.error(f"Failed to fetch balance for {symbol}")
+    return 0.0
+
+async def send_telegram_notification(symbol, error_message):
+    try:
+        bot = Bot(token=TELEGRAM_TOKEN)
+        message = f"Failed to place SELL order for {symbol} after 5 attempts. Error: {error_message}"
+        await bot.send_message(chat_id=CHAT_ID, text=message)
+        logger.info(f"Sent Telegram notification for failed SELL order on {symbol}")
+    except Exception as e:
+        logger.error(f"Failed to send Telegram notification for {symbol}: {e}")
+
+def place_market_order(symbol, side, amount_usdt=None, max_retries=5):
+    endpoint = "/api/v1/trade/order"
+    params = {}
+    symbol_info = get_symbol_info(symbol)
+    if not symbol_info:
+        return None
+    pionex_symbol = symbol.replace("USDT", "_USDT")
+    best_bid, best_ask = get_current_price(symbol)
+    if not best_bid or not best_ask:
+        return None
+    quote_precision = int(symbol_info['quotePrecision'])
+    base_precision = int(symbol_info['basePrecision'])
+    min_amount = float(symbol_info['minAmount'])
+    body = {
+        "symbol": pionex_symbol,
+        "side": side.upper(),
+        "type": "MARKET",
+    }
+    if side.upper() == "BUY":
+        amount_usdt = max(amount_usdt, min_amount)
+        body["amount"] = f"{amount_usdt:.{quote_precision}f}"
+    else:  # SELL
+        if amount_usdt:
+            quantity = amount_usdt / best_bid
+        else:  # Sell entire balance
+            quantity = get_balance(symbol)
+            if quantity <= 0:
+                logger.error(f"No balance available to sell for {symbol}")
+                return None
+        body["size"] = f"{quantity:.{base_precision}f}"
+
+    retries = 0
+    while retries < max_retries if side.upper() == "SELL" else retries < 1:
+        response = api_request("POST", endpoint, params, body)
+        if response and 'data' in response and response['result']:
+            order_id = response['data']['orderId']
+            logger.info(f"Market {side} order placed for {pionex_symbol}: Order ID {order_id}")
+            if side.upper() == "BUY":
+                buy_order_ids[symbol] = order_id
+                quantity = amount_usdt / best_ask if amount_usdt else quantity
+                buy_quantities[symbol] = quantity
+                logger.info(f"Stored buy order ID {order_id} and quantity {quantity} for {symbol}")
+            elif side.upper() == "SELL" and not amount_usdt:  # Full balance sell
+                buy_order_ids[symbol] = None
+                buy_quantities.pop(symbol, None)
+                logger.info(f"Cleared buy order ID and quantity for {symbol}")
+            return order_id
+        logger.error(f"Market {side} order failed for {pionex_symbol}: {response}")
+        retries += 1
+        if side.upper() == "SELL" and retries < max_retries:
+            logger.info(f"Retrying SELL order for {symbol} (Attempt {retries + 1}/{max_retries})")
+            body["size"] = f"{get_balance(symbol):.{base_precision}f}"  # Fetch latest balance
+            time.sleep(5)  # 5-second delay between retries
+        elif side.upper() == "SELL" and retries == max_retries:
+            error_message = f"Failed to place SELL order for {symbol} after {max_retries} attempts"
+            logger.error(error_message)
+            asyncio.create_task(send_telegram_notification(symbol, error_message))
+    return None
+
+# Trading Logic
+async def check_and_trade(symbol):
+    try:
+        logger.info(f"Checking {symbol} - Buy order ID: {buy_order_ids.get(symbol, 'None')}")
+        # Fetch 15-minute candle data from Pionex
+        data = get_historical_data(symbol, '15M', limit=250)
+        if data is None or data.empty:
+            return
+
+        # Calculate HMA
+        data = calculate_hma(data, period=14)
+        if data is None:
+            return
+
+        # Get the latest and previous HMA values and close price
+        hma_current = data['HMA14'].iloc[-2]
+        hma_previous = data['HMA14'].iloc[-3]
+        close_price = data['Close'].iloc[-2]
+        open_price = data['Open'].iloc[-2]
+
+        # Calculate open-to-close price ratio for the latest closed candle
+        price_ratio = abs(open_price - close_price) / open_price if open_price != 0 else float('inf')
+        price_ratio_percent = price_ratio * 100
+
+        logger.info(f"{symbol} - HMA14: {hma_current:.8f}, Close: {close_price:.8f}, "
+                    f"Price Ratio: {price_ratio_percent:.2f}%")
+
+        # Bullish crossover: HMA[-2] > HMA[-3] and price ratio < 2%
+        if (hma_current > hma_previous and 
+            price_ratio < 0.02):
+            if buy_order_ids.get(symbol) is None:
+                # Place buy order for $12
+                buy_order_id = place_market_order(symbol, "BUY", amount_usdt=12)
+                if buy_order_id:
+                    logger.info(f"Placed BUY order for {symbol} (HMA crossover, Price Ratio {price_ratio_percent:.2f}%, Order ID: {buy_order_id})")
+                    # Immediately place sell order for $11
+                    sell_order_id = place_market_order(symbol, "SELL", amount_usdt=11)
+                    if sell_order_id:
+                        logger.info(f"Placed SELL order for {symbol} (post-buy, Order ID: {sell_order_id})")
+                    else:
+                        logger.error(f"Failed to place SELL order for {symbol} after {buy_order_id}")
+                else:
+                    logger.error(f"Failed to place BUY order for {symbol}")
+            else:
+                logger.info(f"Skipped BUY order for {symbol}: Existing buy order ID {buy_order_ids[symbol]}")
+
+        # Cross under: Close[-2] < HMA[-2]
+        elif close_price < hma_current:
+            if buy_order_ids.get(symbol) is not None:
+                # Place buy order for $11
+                buy_order_id = place_market_order(symbol, "BUY", amount_usdt=11)
+                if buy_order_id:
+                    logger.info(f"Placed BUY order for {symbol} (Close below HMA, Order ID: {buy_order_id})")
+                    # Immediately sell entire balance
+                    sell_order_id = place_market_order(symbol, "SELL")
+                    if sell_order_id:
+                        logger.info(f"Placed SELL order for entire balance of {symbol} (Order ID: {sell_order_id})")
+                    else:
+                        logger.error(f"Failed to place SELL order for {symbol} after {buy_order_id}")
+                else:
+                    logger.error(f"Failed to place BUY order for {symbol}")
+            else:
+                logger.info(f"Skipped BUY order for {symbol}: No existing buy order ID")
+
+    except Exception as e:
+        logger.error(f"Error processing {symbol}: {e}")
+
+# Trading Loop
+async def run_trading_loop():
+    while True:
+        if SELECTED_SYMBOLS:
+            valid_symbols = []
+            for symbol in SELECTED_SYMBOLS:
+                # Check if symbol has sufficient data
+                data = get_historical_data(symbol, '15M', limit=250)
+                if data is not None and not data.empty:
+                    valid_symbols.append(symbol)
+                    await check_and_trade(symbol)
+                await asyncio.sleep(0.5)  # Delay to avoid rate limits
+            logger.info(f"Completed trading cycle for {len(valid_symbols)} valid symbols")
+        else:
+            logger.info("No symbols selected, skipping trading cycle")
+        await asyncio.sleep(300)  # Run every 5 minutes
+
+# Main Function
+async def main():
+    # Fetch Pionex USDT pairs
+    global SELECTED_SYMBOLS
+    SELECTED_SYMBOLS = fetch_pionex_symbols()
+    if not SELECTED_SYMBOLS:
+        logger.error("No USDT trading pairs found on Pionex. Exiting.")
+        return
+
+    logger.info(f"Starting trading bot with {len(SELECTED_SYMBOLS)} symbols: {', '.join(SELECTED_SYMBOLS[:5])}...")
+
+    # Start trading loop
+    await run_trading_loop()
+
+if __name__ == '__main__':
+    asyncio.run(main())
