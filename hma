@@ -106,7 +106,7 @@ def fetch_pionex_symbols():
     return []
 
 # Fetch historical OHLCV data from Pionex
-def get_historical_data(symbol, interval='15M', limit=250):
+def get_historical_data(symbol, interval='4H', limit=70):
     try:
         if interval not in VALID_INTERVALS:
             logger.error(f"Invalid interval {interval} for {symbol}. Valid intervals: {VALID_INTERVALS}")
