@@ -260,7 +260,7 @@ async def check_and_trade(symbol):
     try:
         logger.info(f"Checking {symbol} - Buy order ID: {buy_order_ids.get(symbol, 'None')}")
         # Fetch 15-minute candle data from Pionex
-        data = get_historical_data(symbol, '15M', limit=250)
+        data = get_historical_data(symbol, '4H', limit=70)
         if data is None or data.empty:
             return
 
@@ -287,11 +287,11 @@ async def check_and_trade(symbol):
             price_ratio < 0.02):
             if buy_order_ids.get(symbol) is None:
                 # Place buy order for $12
-                buy_order_id = place_market_order(symbol, "BUY", amount_usdt=12)
+                buy_order_id = place_market_order(symbol, "BUY", amount_usdt=15)
                 if buy_order_id:
                     logger.info(f"Placed BUY order for {symbol} (HMA crossover, Price Ratio {price_ratio_percent:.2f}%, Order ID: {buy_order_id})")
                     # Immediately place sell order for $11
-                    sell_order_id = place_market_order(symbol, "SELL", amount_usdt=11)
+                    sell_order_id = place_market_order(symbol, "SELL", amount_usdt=12)
                     if sell_order_id:
                         logger.info(f"Placed SELL order for {symbol} (post-buy, Order ID: {sell_order_id})")
                     else:
@@ -329,15 +329,15 @@ async def run_trading_loop():
             valid_symbols = []
             for symbol in SELECTED_SYMBOLS:
                 # Check if symbol has sufficient data
-                data = get_historical_data(symbol, '15M', limit=250)
+                data = get_historical_data(symbol, '4H', limit=70)
                 if data is not None and not data.empty:
                     valid_symbols.append(symbol)
                     await check_and_trade(symbol)
-                await asyncio.sleep(0.5)  # Delay to avoid rate limits
+                await asyncio.sleep(5)  # Delay to avoid rate limits
             logger.info(f"Completed trading cycle for {len(valid_symbols)} valid symbols")
         else:
             logger.info("No symbols selected, skipping trading cycle")
-        await asyncio.sleep(300)  # Run every 5 minutes
+        await asyncio.sleep(600)  # Run every 5 minutes
 
 # Main Function
 async def main():
