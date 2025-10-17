@@ -10,6 +10,7 @@ import logging
 import asyncio
 import nest_asyncio
 from telegram import Bot
+from datetime import datetime, timedelta
 import config  # User must provide this module
 
 # Apply nest_asyncio to allow nested event loops
@@ -113,10 +114,13 @@ def get_historical_data(symbol, interval='4H', limit=70):
             return None
         pionex_symbol = symbol.replace("USDT", "_USDT")
         endpoint = "/api/v1/market/klines"
+        # Add endTime to fetch up to "now" (current timestamp in ms)
+        end_time_ms = int(time.time() * 1000)
         params = {
             "symbol": pionex_symbol,
             "interval": interval,
-            "limit": limit
+            "limit": limit,
+            "endTime": end_time_ms  # Ensures data up to current time
         }
         data = api_request("GET", endpoint, params)
         if not data or 'data' not in data or 'klines' not in data['data']:
@@ -129,16 +133,30 @@ def get_historical_data(symbol, interval='4H', limit=70):
         df = pd.DataFrame(klines, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['time'], unit='ms')
         df.set_index('timestamp', inplace=True)
+        # CRITICAL: Sort by timestamp ascending (oldest first) to fix descending API order
+        df = df.sort_index(ascending=True)
         df = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
         df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
-        logger.info(f"Fetched {len(df)} {interval} klines for {symbol}. "
-                    f"Last candle: {df.index[-1]}, Second-to-last: {df.index[-2]}")
+        
+        # Freshness check: Warn if data is stale
+        now = datetime.utcnow()
+        last_candle_time = df.index[-1]
+        time_diff = now - last_candle_time
+        staleness_hours = time_diff.total_seconds() / 3600
+        if staleness_hours > 24:
+            logger.warning(f"Stale data for {symbol}: Last candle {last_candle_time} is {staleness_hours:.1f} hours old!")
+        if staleness_hours > 48:
+            logger.error(f"Data too stale for {symbol} (>{staleness_hours:.1f} hours old). Skipping.")
+            return None
+        
+        logger.info(f"Fetched {len(df)} {interval} klines for {symbol} (sorted ascending). "
+                    f"First candle: {df.index[0]}, Last candle: {df.index[-1]}, Second-to-last: {df.index[-2]}")
         return df
     except Exception as e:
         logger.error(f"Failed to fetch {interval} data for {symbol}: {e}")
         return None
 
-# Calculate HMA
+# Calculate HMA (unchanged)
 def calculate_hma(df, period=14, column='Close'):
     try:
         wma1 = df[column].rolling(window=period).mean() * 2
@@ -153,7 +171,7 @@ def calculate_hma(df, period=14, column='Close'):
         logger.error(f"Failed to calculate HMA for {period}-period: {e}")
         return None
 
-# Pionex Trading Functions
+# Pionex Trading Functions (unchanged)
 def get_symbol_info(symbol):
     endpoint = "/api/v1/common/symbols"
     pionex_symbol = symbol.replace("USDT", "_USDT")
@@ -262,7 +280,7 @@ def place_market_order(symbol, side, amount_usdt=None, max_retries=5):
 async def check_and_trade(symbol):
     try:
         logger.info(f"Checking {symbol} - Buy order ID: {buy_order_ids.get(symbol, 'None')}")
-        # Fetch 15-minute candle data from Pionex
+        # Fetch 4H candle data from Pionex
         data = get_historical_data(symbol, '4H', limit=70)
         if data is None or data.empty:
             logger.error(f"No data available for {symbol}")
@@ -279,7 +297,7 @@ async def check_and_trade(symbol):
             logger.error(f"Insufficient data for {symbol}: {len(data)} rows")
             return
 
-        # Get the latest and previous HMA values and close price
+        # Get the latest and previous HMA values and close price (now guaranteed recent due to sorting/freshness)
         hma_current = data['HMA14'].iloc[-2]
         hma_previous = data['HMA14'].iloc[-3]
         close_price = data['Close'].iloc[-2]
