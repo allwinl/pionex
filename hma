@@ -123,7 +123,7 @@ def get_historical_data(symbol, interval='4H', limit=70):
             logger.error(f"Failed to fetch {interval} data for {symbol}: Invalid API response - {data}")
             return None
         klines = data['data']['klines']
-        if len(klines) < 200:
+        if len(klines) < 20:
             logger.error(f"Insufficient {interval} data for {symbol}: Only {len(klines)} klines received")
             return None
         df = pd.DataFrame(klines, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
