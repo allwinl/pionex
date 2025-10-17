@@ -131,13 +131,14 @@ def get_historical_data(symbol, interval='4H', limit=70):
         df.set_index('timestamp', inplace=True)
         df = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
         df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
-        logger.info(f"Successfully fetched {len(df)} {interval} klines for {symbol}")
+        logger.info(f"Fetched {len(df)} {interval} klines for {symbol}. "
+                    f"Last candle: {df.index[-1]}, Second-to-last: {df.index[-2]}")
         return df
     except Exception as e:
         logger.error(f"Failed to fetch {interval} data for {symbol}: {e}")
         return None
 
-# Calculate HMA (from CoinEx script)
+# Calculate HMA
 def calculate_hma(df, period=14, column='Close'):
     try:
         wma1 = df[column].rolling(window=period).mean() * 2
@@ -145,6 +146,8 @@ def calculate_hma(df, period=14, column='Close'):
         raw_hma = 2 * wma1 - wma2
         hma = raw_hma.rolling(window=int(np.sqrt(period))).mean().round(8)
         df['HMA14'] = hma
+        logger.info(f"Calculated HMA for {len(df)} candles. Last HMA: {df['HMA14'].iloc[-1]:.8f}, "
+                    f"Second-to-last HMA: {df['HMA14'].iloc[-2]:.8f}")
         return df
     except Exception as e:
         logger.error(f"Failed to calculate HMA for {period}-period: {e}")
@@ -262,11 +265,18 @@ async def check_and_trade(symbol):
         # Fetch 15-minute candle data from Pionex
         data = get_historical_data(symbol, '4H', limit=70)
         if data is None or data.empty:
+            logger.error(f"No data available for {symbol}")
             return
 
         # Calculate HMA
         data = calculate_hma(data, period=14)
         if data is None:
+            logger.error(f"HMA calculation failed for {symbol}")
+            return
+
+        # Verify sufficient data
+        if len(data) < 3:
+            logger.error(f"Insufficient data for {symbol}: {len(data)} rows")
             return
 
         # Get the latest and previous HMA values and close price
@@ -275,22 +285,25 @@ async def check_and_trade(symbol):
         close_price = data['Close'].iloc[-2]
         open_price = data['Open'].iloc[-2]
 
+        # Log the candle being used
+        logger.info(f"{symbol} - Using candle at {data.index[-2]}: Close={close_price:.8f}, "
+                    f"HMA14={hma_current:.8f}, Prev HMA14={hma_previous:.8f}")
+
         # Calculate open-to-close price ratio for the latest closed candle
         price_ratio = abs(open_price - close_price) / open_price if open_price != 0 else float('inf')
         price_ratio_percent = price_ratio * 100
 
-        logger.info(f"{symbol} - HMA14: {hma_current:.8f}, Close: {close_price:.8f}, "
-                    f"Price Ratio: {price_ratio_percent:.2f}%")
+        logger.info(f"{symbol} - Price Ratio: {price_ratio_percent:.2f}%")
 
         # Bullish crossover: HMA[-2] > HMA[-3] and price ratio < 2%
         if (hma_current > hma_previous and 
             price_ratio < 0.02):
             if buy_order_ids.get(symbol) is None:
-                # Place buy order for $12
+                # Place buy order for $15
                 buy_order_id = place_market_order(symbol, "BUY", amount_usdt=15)
                 if buy_order_id:
                     logger.info(f"Placed BUY order for {symbol} (HMA crossover, Price Ratio {price_ratio_percent:.2f}%, Order ID: {buy_order_id})")
-                    # Immediately place sell order for $11
+                    # Immediately place sell order for $12
                     sell_order_id = place_market_order(symbol, "SELL", amount_usdt=12)
                     if sell_order_id:
                         logger.info(f"Placed SELL order for {symbol} (post-buy, Order ID: {sell_order_id})")
@@ -330,14 +343,14 @@ async def run_trading_loop():
             for symbol in SELECTED_SYMBOLS:
                 # Check if symbol has sufficient data
                 data = get_historical_data(symbol, '4H', limit=70)
-                if data is not None and not data.empty:
+                if data is not None and not data.empty and len(data) >= 3:
                     valid_symbols.append(symbol)
                     await check_and_trade(symbol)
                 await asyncio.sleep(5)  # Delay to avoid rate limits
             logger.info(f"Completed trading cycle for {len(valid_symbols)} valid symbols")
         else:
             logger.info("No symbols selected, skipping trading cycle")
-        await asyncio.sleep(600)  # Run every 5 minutes
+        await asyncio.sleep(300)  # Run every 5 minutes
 
 # Main Function
 async def main():
