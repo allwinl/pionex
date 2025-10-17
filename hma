@@ -1,5 +1,6 @@
 import requests
 import pandas as pd
+import numpy as np
 import time
 import hmac
 import hashlib
@@ -8,7 +9,6 @@ import json
 import logging
 import asyncio
 import nest_asyncio
-import ta
 from telegram import Bot
 import config  # User must provide this module
 
@@ -137,13 +137,17 @@ def get_historical_data(symbol, interval='15M', limit=250):
         logger.error(f"Failed to fetch {interval} data for {symbol}: {e}")
         return None
 
-def calculate_hma(df, period=14):
+# Calculate HMA (from CoinEx script)
+def calculate_hma(df, period=14, column='Close'):
     try:
-        # Calculate HMA using ta library
-        df['HMA14'] = ta.trend.hma_indicator(df['Close'], window=period).round(8)
+        wma1 = df[column].rolling(window=period).mean() * 2
+        wma2 = df[column].rolling(window=int(period/2)).mean()
+        raw_hma = 2 * wma1 - wma2
+        hma = raw_hma.rolling(window=int(np.sqrt(period))).mean().round(8)
+        df['HMA14'] = hma
         return df
     except Exception as e:
-        logger.error(f"Failed to calculate HMA: {e}")
+        logger.error(f"Failed to calculate HMA for {period}-period: {e}")
         return None
 
 # Pionex Trading Functions
