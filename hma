@@ -301,6 +301,7 @@ async def check_and_trade(symbol):
 
         hma_current = data['HMA14'].iloc[-2]
         hma_previous = data['HMA14'].iloc[-3]
+        hma_third = data['HMA14'].iloc[-4]
         close_price = data['Close'].iloc[-2]
         open_price = data['Open'].iloc[-2]
 
@@ -309,7 +310,7 @@ async def check_and_trade(symbol):
 
         logger.info(f"{symbol} - Price Ratio: {price_ratio_percent:.2f}%")
 
-        if hma_current > hma_previous and price_ratio < 0.02:
+        if (hma_current > hma_previous and hma_previous < hma_third) and price_ratio < 0.02:
             if buy_order_ids.get(symbol) is None:
                 buy_order_id = place_market_order(symbol, "BUY", amount_usdt=15)
                 if buy_order_id:
