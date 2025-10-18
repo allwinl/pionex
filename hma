@@ -101,7 +101,6 @@ def fetch_pionex_symbols():
     if data and 'data' in data and 'symbols' in data['data']:
         symbols = [s['symbol'].replace("_USDT", "USDT") for s in data['data']['symbols'] 
                    if s['quoteCurrency'] == 'USDT' and s['enable']]
-        logger.info(f"Fetched {len(symbols)} USDT trading pairs from Pionex: {', '.join(symbols[:5])}...")
         return symbols
     logger.error("Failed to fetch symbols from Pionex")
     return []
@@ -145,8 +144,6 @@ def get_historical_data(symbol, interval='4H', limit=100):
             logger.error(f"Data too stale for {symbol} (>{staleness_hours:.1f} hours old). Skipping.")
             return None
         
-        logger.info(f"Fetched {len(df)} {interval} klines for {symbol} (sorted ascending). "
-                    f"First candle: {df.index[0]}, Last candle: {df.index[-1]}, Second-to-last: {df.index[-2]}")
         return df
     except Exception as e:
         logger.error(f"Failed to fetch {interval} data for {symbol}: {e}")
@@ -158,9 +155,6 @@ def calculate_hma(df, period=14, column='Close'):
             logger.error(f"Insufficient data for HMA calculation: {len(df)} candles, need at least {period + int(np.sqrt(period))}")
             return None
 
-        recent_closes = df[column].tail(period).to_list()
-        logger.info(f"Last {period} close prices for HMA calculation (last candle): {recent_closes}")
-
         wma1 = talib.WMA(df[column], timeperiod=int(period / 2))
         wma2 = talib.WMA(df[column], timeperiod=period)
         raw_hma = 2 * wma1 - wma2
@@ -168,20 +162,10 @@ def calculate_hma(df, period=14, column='Close'):
         hma = talib.WMA(raw_hma, timeperiod=hma_period).round(8)
         df['HMA14'] = hma
 
-        if not np.isnan(wma1.iloc[-1]) and not np.isnan(wma2.iloc[-1]) and not np.isnan(raw_hma.iloc[-1]):
-            logger.info(f"Intermediate WMA values - WMA1 (last, period={int(period/2)}): {wma1.iloc[-1]:.8f}, "
-                        f"WMA2 (last, period={period}): {wma2.iloc[-1]:.8f}, "
-                        f"Raw HMA (last): {raw_hma.iloc[-1]:.8f}")
-        else:
+        if np.isnan(wma1.iloc[-1]) or np.isnan(wma2.iloc[-1]) or np.isnan(raw_hma.iloc[-1]):
             logger.warning("Intermediate WMA values contain NaN for the last candle")
-
-        if not df['HMA14'].iloc[-1:].isna().any():
-            logger.info(f"Calculated HMA for {len(df)} candles. "
-                        f"Last HMA: {df['HMA14'].iloc[-1]:.8f}, "
-                        f"Second-to-last HMA: {df['HMA14'].iloc[-2]:.8f}, "
-                        f"Last Close: {df[column].iloc[-1]:.8f}, "
-                        f"Second-to-last Close: {df[column].iloc[-2]:.8f}")
-        else:
+        
+        if df['HMA14'].iloc[-1:].isna().any():
             logger.error("HMA contains NaN values for recent candles")
             return None
 
@@ -302,7 +286,7 @@ async def check_and_trade(symbol):
             logger.error(f"No data available for {symbol}")
             return
 
-        data = calculate_hma(data, period=14)  # Using period=14 to match TradingView
+        data = calculate_hma(data, period=14)
         if data is None:
             logger.error(f"HMA calculation failed for {symbol}")
             return
@@ -315,18 +299,10 @@ async def check_and_trade(symbol):
             logger.error(f"Skipping {symbol}: HMA values contain NaN")
             return
 
-        logger.info(f"{symbol} - Close prices for last 3 candles: "
-                    f"[{data.index[-3]}: {data['Close'].iloc[-3]:.8f}, "
-                    f"{data.index[-2]}: {data['Close'].iloc[-2]:.8f}, "
-                    f"{data.index[-1]}: {data['Close'].iloc[-1]:.8f}]")
-
         hma_current = data['HMA14'].iloc[-2]
         hma_previous = data['HMA14'].iloc[-3]
         close_price = data['Close'].iloc[-2]
         open_price = data['Open'].iloc[-2]
-
-        logger.info(f"{symbol} - Using candle at {data.index[-2]}: Close={close_price:.8f}, "
-                    f"HMA14={hma_current:.8f}, Prev HMA14={hma_previous:.8f}")
 
         price_ratio = abs(open_price - close_price) / open_price if open_price != 0 else float('inf')
         price_ratio_percent = price_ratio * 100
@@ -387,7 +363,6 @@ async def main():
         logger.error("No USDT trading pairs found on Pionex. Exiting.")
         return
 
-    logger.info(f"Starting trading bot with {len(SELECTED_SYMBOLS)} symbols: {', '.join(SELECTED_SYMBOLS[:5])}...")
     await run_trading_loop()
 
 if __name__ == '__main__':
