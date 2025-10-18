@@ -11,6 +11,7 @@ import asyncio
 import nest_asyncio
 from telegram import Bot
 from datetime import datetime, timedelta, UTC
+import talib  # Add talib for WMA
 import config  # User must provide this module
 
 # Apply nest_asyncio to allow nested event loops
@@ -128,7 +129,7 @@ def get_historical_data(symbol, interval='4H', limit=70):
             logger.error(f"Insufficient {interval} data for {symbol}: Only {len(klines)} klines received")
             return None
         df = pd.DataFrame(klines, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['time'], unit='ms', utc=True)  # Set UTC timezone
+        df['timestamp'] = pd.to_datetime(df['time'], unit='ms', utc=True)
         df.set_index('timestamp', inplace=True)
         df = df.sort_index(ascending=True)
         df = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
@@ -153,21 +154,23 @@ def get_historical_data(symbol, interval='4H', limit=70):
 
 def calculate_hma(df, period=14, column='Close'):
     try:
+        if len(df) < period:
+            logger.error(f"Insufficient data for HMA calculation: {len(df)} candles, need at least {period}")
+            return None
+
         recent_closes = df[column].tail(14).to_list()
         logger.info(f"Last 14 close prices for HMA calculation: {recent_closes}")
 
-        def weighted_moving_average(series, period):
-            weights = np.arange(1, period + 1)
-            return series.rolling(window=period).apply(
-                lambda x: np.sum(x * weights) / weights.sum(), raw=True
-            )
-
-        wma1 = weighted_moving_average(df[column], period) * 2
-        wma2 = weighted_moving_average(df[column], int(period / 2))
+        wma1 = talib.WMA(df[column], timeperiod=period) * 2
+        wma2 = talib.WMA(df[column], timeperiod=int(period / 2))
         raw_hma = 2 * wma1 - wma2
         hma_period = int(np.sqrt(period))
-        hma = weighted_moving_average(raw_hma, hma_period).round(8)
+        hma = talib.WMA(raw_hma, timeperiod=hma_period).round(8)
         df['HMA14'] = hma
+
+        logger.info(f"Intermediate WMA values - WMA1 (last): {wma1.iloc[-1]:.8f}, "
+                    f"WMA2 (last): {wma2.iloc[-1]:.8f}, "
+                    f"Raw HMA (last): {raw_hma.iloc[-1]:.8f}")
 
         logger.info(f"Calculated HMA for {len(df)} candles. "
                     f"Last HMA: {df['HMA14'].iloc[-1]:.8f}, "
