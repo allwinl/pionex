@@ -11,7 +11,7 @@ import asyncio
 import nest_asyncio
 from telegram import Bot
 from datetime import datetime, timedelta, UTC
-import talib  # Add talib for WMA
+import talib  # For WMA calculations
 import config  # User must provide this module
 
 # Apply nest_asyncio to allow nested event loops
@@ -158,25 +158,33 @@ def calculate_hma(df, period=14, column='Close'):
             logger.error(f"Insufficient data for HMA calculation: {len(df)} candles, need at least {period}")
             return None
 
-        recent_closes = df[column].tail(14).to_list()
-        logger.info(f"Last 14 close prices for HMA calculation: {recent_closes}")
+        recent_closes = df[column].tail(period).to_list()
+        logger.info(f"Last {period} close prices for HMA calculation (last candle): {recent_closes}")
 
         wma1 = talib.WMA(df[column], timeperiod=period) * 2
         wma2 = talib.WMA(df[column], timeperiod=int(period / 2))
-        raw_hma = 2 * wma1 - wma2
+        raw_hma = wma1 - wma2
         hma_period = int(np.sqrt(period))
         hma = talib.WMA(raw_hma, timeperiod=hma_period).round(8)
         df['HMA14'] = hma
 
-        logger.info(f"Intermediate WMA values - WMA1 (last): {wma1.iloc[-1]:.8f}, "
-                    f"WMA2 (last): {wma2.iloc[-1]:.8f}, "
-                    f"Raw HMA (last): {raw_hma.iloc[-1]:.8f}")
+        if not np.isnan(wma1.iloc[-1]) and not np.isnan(wma2.iloc[-1]) and not np.isnan(raw_hma.iloc[-1]):
+            logger.info(f"Intermediate WMA values - WMA1 (last): {wma1.iloc[-1]:.8f}, "
+                        f"WMA2 (last): {wma2.iloc[-1]:.8f}, "
+                        f"Raw HMA (last): {raw_hma.iloc[-1]:.8f}")
+        else:
+            logger.warning("Intermediate WMA values contain NaN for the last candle")
 
-        logger.info(f"Calculated HMA for {len(df)} candles. "
-                    f"Last HMA: {df['HMA14'].iloc[-1]:.8f}, "
-                    f"Second-to-last HMA: {df['HMA14'].iloc[-2]:.8f}, "
-                    f"Last Close: {df[column].iloc[-1]:.8f}, "
-                    f"Second-to-last Close: {df[column].iloc[-2]:.8f}")
+        if not df['HMA14'].iloc[-1:].isna().any():
+            logger.info(f"Calculated HMA for {len(df)} candles. "
+                        f"Last HMA: {df['HMA14'].iloc[-1]:.8f}, "
+                        f"Second-to-last HMA: {df['HMA14'].iloc[-2]:.8f}, "
+                        f"Last Close: {df[column].iloc[-1]:.8f}, "
+                        f"Second-to-last Close: {df[column].iloc[-2]:.8f}")
+        else:
+            logger.error("HMA contains NaN values for recent candles")
+            return None
+
         return df
     except Exception as e:
         logger.error(f"Failed to calculate HMA for {period}-period: {e}")
@@ -294,7 +302,7 @@ async def check_and_trade(symbol):
             logger.error(f"No data available for {symbol}")
             return
 
-        data = calculate_hma(data, period=14)
+        data = calculate_hma(data, period=14)  # Test with period=9 to match TradingView
         if data is None:
             logger.error(f"HMA calculation failed for {symbol}")
             return
