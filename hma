@@ -351,11 +351,11 @@ async def run_trading_loop():
                 if data is not None and not data.empty and len(data) >= 3:
                     valid_symbols.append(symbol)
                     await check_and_trade(symbol)
-                await asyncio.sleep(5)
+                await asyncio.sleep(2)
             logger.info(f"Completed trading cycle for {len(valid_symbols)} valid symbols")
         else:
             logger.info("No symbols selected, skipping trading cycle")
-        await asyncio.sleep(300)
+        await asyncio.sleep(600)
 
 async def main():
     global SELECTED_SYMBOLS
