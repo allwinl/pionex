@@ -106,7 +106,7 @@ def fetch_pionex_symbols():
     logger.error("Failed to fetch symbols from Pionex")
     return []
 
-def get_historical_data(symbol, interval='4H', limit=70):
+def get_historical_data(symbol, interval='4H', limit=100):
     try:
         if interval not in VALID_INTERVALS:
             logger.error(f"Invalid interval {interval} for {symbol}. Valid intervals: {VALID_INTERVALS}")
@@ -154,23 +154,23 @@ def get_historical_data(symbol, interval='4H', limit=70):
 
 def calculate_hma(df, period=14, column='Close'):
     try:
-        if len(df) < period:
-            logger.error(f"Insufficient data for HMA calculation: {len(df)} candles, need at least {period}")
+        if len(df) < period + int(np.sqrt(period)):
+            logger.error(f"Insufficient data for HMA calculation: {len(df)} candles, need at least {period + int(np.sqrt(period))}")
             return None
 
         recent_closes = df[column].tail(period).to_list()
         logger.info(f"Last {period} close prices for HMA calculation (last candle): {recent_closes}")
 
-        wma1 = talib.WMA(df[column], timeperiod=period) * 2
-        wma2 = talib.WMA(df[column], timeperiod=int(period / 2))
-        raw_hma = wma1 - wma2
+        wma1 = talib.WMA(df[column], timeperiod=int(period / 2))
+        wma2 = talib.WMA(df[column], timeperiod=period)
+        raw_hma = 2 * wma1 - wma2
         hma_period = int(np.sqrt(period))
         hma = talib.WMA(raw_hma, timeperiod=hma_period).round(8)
         df['HMA14'] = hma
 
         if not np.isnan(wma1.iloc[-1]) and not np.isnan(wma2.iloc[-1]) and not np.isnan(raw_hma.iloc[-1]):
-            logger.info(f"Intermediate WMA values - WMA1 (last): {wma1.iloc[-1]:.8f}, "
-                        f"WMA2 (last): {wma2.iloc[-1]:.8f}, "
+            logger.info(f"Intermediate WMA values - WMA1 (last, period={int(period/2)}): {wma1.iloc[-1]:.8f}, "
+                        f"WMA2 (last, period={period}): {wma2.iloc[-1]:.8f}, "
                         f"Raw HMA (last): {raw_hma.iloc[-1]:.8f}")
         else:
             logger.warning("Intermediate WMA values contain NaN for the last candle")
@@ -297,18 +297,22 @@ def place_market_order(symbol, side, amount_usdt=None, max_retries=5):
 async def check_and_trade(symbol):
     try:
         logger.info(f"Checking {symbol} - Buy order ID: {buy_order_ids.get(symbol, 'None')}")
-        data = get_historical_data(symbol, '4H', limit=70)
+        data = get_historical_data(symbol, '4H', limit=100)
         if data is None or data.empty:
             logger.error(f"No data available for {symbol}")
             return
 
-        data = calculate_hma(data, period=14)  # Test with period=9 to match TradingView
+        data = calculate_hma(data, period=14)  # Using period=14 to match TradingView
         if data is None:
             logger.error(f"HMA calculation failed for {symbol}")
             return
 
         if len(data) < 3:
             logger.error(f"Insufficient data for {symbol}: {len(data)} rows")
+            return
+
+        if data['HMA14'].iloc[-2:].isna().any():
+            logger.error(f"Skipping {symbol}: HMA values contain NaN")
             return
 
         logger.info(f"{symbol} - Close prices for last 3 candles: "
@@ -366,7 +370,7 @@ async def run_trading_loop():
         if SELECTED_SYMBOLS:
             valid_symbols = []
             for symbol in SELECTED_SYMBOLS:
-                data = get_historical_data(symbol, '4H', limit=70)
+                data = get_historical_data(symbol, '4H', limit=100)
                 if data is not None and not data.empty and len(data) >= 3:
                     valid_symbols.append(symbol)
                     await check_and_trade(symbol)
