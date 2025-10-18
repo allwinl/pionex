@@ -10,7 +10,7 @@ import logging
 import asyncio
 import nest_asyncio
 from telegram import Bot
-from datetime import datetime, timedelta, UTC  # Updated import
+from datetime import datetime, timedelta, UTC
 import config  # User must provide this module
 
 # Apply nest_asyncio to allow nested event loops
@@ -45,10 +45,10 @@ TELEGRAM_TOKEN = config.TELEGRAM_TOKEN
 CHAT_ID = config.CHAT_ID
 
 # Global variables
-SELECTED_SYMBOLS = []  # Will be populated with Pionex USDT pairs
-last_orders = {}  # Track last order side for each symbol
-buy_order_ids = {}  # Track buy order IDs for each symbol
-buy_quantities = {}  # Track quantity purchased during buy orders
+SELECTED_SYMBOLS = []
+last_orders = {}
+buy_order_ids = {}
+buy_quantities = {}
 
 # Valid intervals for Pionex kline API
 VALID_INTERVALS = ['1M', '5M', '15M', '30M', '60M', '4H', '8H', '12H', '1D']
@@ -93,7 +93,6 @@ def api_request(method, endpoint, params=None, body=None):
         logger.error(f"API request failed for {endpoint}: {e}")
         return None
 
-# Fetch valid symbols from Pionex
 def fetch_pionex_symbols():
     endpoint = "/api/v1/common/symbols"
     params = {}
@@ -106,7 +105,6 @@ def fetch_pionex_symbols():
     logger.error("Failed to fetch symbols from Pionex")
     return []
 
-# Fetch historical OHLCV data from Pionex
 def get_historical_data(symbol, interval='4H', limit=70):
     try:
         if interval not in VALID_INTERVALS:
@@ -130,7 +128,7 @@ def get_historical_data(symbol, interval='4H', limit=70):
             logger.error(f"Insufficient {interval} data for {symbol}: Only {len(klines)} klines received")
             return None
         df = pd.DataFrame(klines, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['time'], unit='ms')
+        df['timestamp'] = pd.to_datetime(df['time'], unit='ms', utc=True)  # Set UTC timezone
         df.set_index('timestamp', inplace=True)
         df = df.sort_index(ascending=True)
         df = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
@@ -153,21 +151,17 @@ def get_historical_data(symbol, interval='4H', limit=70):
         logger.error(f"Failed to fetch {interval} data for {symbol}: {e}")
         return None
 
-# Calculate HMA
 def calculate_hma(df, period=14, column='Close'):
     try:
-        # Log the last 14 close prices to verify data
         recent_closes = df[column].tail(14).to_list()
         logger.info(f"Last 14 close prices for HMA calculation: {recent_closes}")
 
-        # Define WMA function
         def weighted_moving_average(series, period):
-            weights = np.arange(1, period + 1)  # Weights: [1, 2, 3, ..., period]
+            weights = np.arange(1, period + 1)
             return series.rolling(window=period).apply(
                 lambda x: np.sum(x * weights) / weights.sum(), raw=True
             )
 
-        # Calculate WMA for period n and n/2
         wma1 = weighted_moving_average(df[column], period) * 2
         wma2 = weighted_moving_average(df[column], int(period / 2))
         raw_hma = 2 * wma1 - wma2
@@ -175,7 +169,6 @@ def calculate_hma(df, period=14, column='Close'):
         hma = weighted_moving_average(raw_hma, hma_period).round(8)
         df['HMA14'] = hma
 
-        # Log HMA values and corresponding close prices
         logger.info(f"Calculated HMA for {len(df)} candles. "
                     f"Last HMA: {df['HMA14'].iloc[-1]:.8f}, "
                     f"Second-to-last HMA: {df['HMA14'].iloc[-2]:.8f}, "
@@ -186,7 +179,6 @@ def calculate_hma(df, period=14, column='Close'):
         logger.error(f"Failed to calculate HMA for {period}-period: {e}")
         return None
 
-# Pionex Trading Functions
 def get_symbol_info(symbol):
     endpoint = "/api/v1/common/symbols"
     pionex_symbol = symbol.replace("USDT", "_USDT")
@@ -274,7 +266,7 @@ def place_market_order(symbol, side, amount_usdt=None, max_retries=5):
                 quantity = amount_usdt / best_ask if amount_usdt else quantity
                 buy_quantities[symbol] = quantity
                 logger.info(f"Stored buy order ID {order_id} and quantity {quantity} for {symbol}")
-            elif side.upper() == "SELL" and not amount_usdt:  # Full balance sell
+            elif side.upper() == "SELL" and not amount_usdt:
                 buy_order_ids[symbol] = None
                 buy_quantities.pop(symbol, None)
                 logger.info(f"Cleared buy order ID and quantity for {symbol}")
@@ -291,7 +283,6 @@ def place_market_order(symbol, side, amount_usdt=None, max_retries=5):
             asyncio.create_task(send_telegram_notification(symbol, error_message))
     return None
 
-# Trading Logic
 async def check_and_trade(symbol):
     try:
         logger.info(f"Checking {symbol} - Buy order ID: {buy_order_ids.get(symbol, 'None')}")
@@ -309,7 +300,6 @@ async def check_and_trade(symbol):
             logger.error(f"Insufficient data for {symbol}: {len(data)} rows")
             return
 
-        # Log close prices for the candles used
         logger.info(f"{symbol} - Close prices for last 3 candles: "
                     f"[{data.index[-3]}: {data['Close'].iloc[-3]:.8f}, "
                     f"{data.index[-2]}: {data['Close'].iloc[-2]:.8f}, "
@@ -360,7 +350,6 @@ async def check_and_trade(symbol):
     except Exception as e:
         logger.error(f"Error processing {symbol}: {e}")
 
-# Trading Loop
 async def run_trading_loop():
     while True:
         if SELECTED_SYMBOLS:
@@ -376,7 +365,6 @@ async def run_trading_loop():
             logger.info("No symbols selected, skipping trading cycle")
         await asyncio.sleep(300)
 
-# Main Function
 async def main():
     global SELECTED_SYMBOLS
     SELECTED_SYMBOLS = fetch_pionex_symbols()
